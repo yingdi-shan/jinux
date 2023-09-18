@@ -191,8 +191,44 @@ impl From<jinux_frame::Error> for Error {
     }
 }
 
+impl From<jinux_block::bio::BioEnqueueError> for Error {
+    fn from(error: jinux_block::bio::BioEnqueueError) -> Self {
+        match error {
+            jinux_block::bio::BioEnqueueError::IsFull => {
+                Error::with_message(Errno::EBUSY, "The request queue is full")
+            }
+            jinux_block::bio::BioEnqueueError::Refused => {
+                Error::with_message(Errno::EBUSY, "Refuse to enqueue the bio")
+            }
+        }
+    }
+}
+
+impl From<jinux_block::bio::BioStatus> for Error {
+    fn from(err_status: jinux_block::bio::BioStatus) -> Self {
+        match err_status {
+            jinux_block::bio::BioStatus::NotSupported => {
+                Error::with_message(Errno::EIO, "I/O operation is not supported")
+            }
+            jinux_block::bio::BioStatus::NoSpace => {
+                Error::with_message(Errno::ENOSPC, "Insufficient space on device")
+            }
+            jinux_block::bio::BioStatus::IoError => {
+                Error::with_message(Errno::EIO, "I/O operation fails")
+            }
+            status => panic!("Can not convert the status: {:?} to an error", status),
+        }
+    }
+}
+
 impl From<core::str::Utf8Error> for Error {
     fn from(_: core::str::Utf8Error) -> Self {
+        Error::with_message(Errno::EINVAL, "Invalid utf-8 string")
+    }
+}
+
+impl From<alloc::string::FromUtf8Error> for Error {
+    fn from(_: alloc::string::FromUtf8Error) -> Self {
         Error::with_message(Errno::EINVAL, "Invalid utf-8 string")
     }
 }

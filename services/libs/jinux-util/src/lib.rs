@@ -1,6 +1,7 @@
 //! The util of jinux
 #![no_std]
 #![forbid(unsafe_code)]
+#![feature(int_roundings)]
 
 extern crate alloc;
 

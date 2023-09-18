@@ -14,7 +14,6 @@ pub mod gdb;
 pub mod machine;
 
 use std::{
-    fs::OpenOptions,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -175,9 +174,9 @@ fn main() {
         qemu_cmd.args(qemu_grub_efi::NOIOMMU_DEVICE_ARGS);
     }
 
-    let fs_image = create_fs_image(args.path.as_path());
+    let ext2_image = get_ext2_image(&PathBuf::from("regression/build/ext2.img"));
     qemu_cmd.arg("-drive");
-    qemu_cmd.arg(fs_image);
+    qemu_cmd.arg(ext2_image);
 
     if args.boot_method == BootMethod::Microvm {
         let image = microvm::create_bootdev_image(args.path);
@@ -221,20 +220,10 @@ fn main() {
     }
 }
 
-pub fn create_fs_image(path: &Path) -> String {
-    let mut fs_img_path = path.parent().unwrap().to_str().unwrap().to_string();
-    fs_img_path.push_str("/fs.img");
-    let path = Path::new(fs_img_path.as_str());
-    if path.exists() {
-        return format!("file={},if=none,format=raw,id=x0", fs_img_path.as_str());
+pub fn get_ext2_image(path: &Path) -> String {
+    if !path.exists() {
+        panic!("can not find the ext2 image")
     }
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(fs_img_path.as_str())
-        .unwrap();
-    // 32MiB
-    f.set_len(64 * 1024 * 1024).unwrap();
-    format!("file={},if=none,format=raw,id=x0", fs_img_path.as_str())
+
+    format!("file={},if=none,format=raw,id=x0", path.to_string_lossy())
 }

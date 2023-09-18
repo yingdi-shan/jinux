@@ -2,29 +2,39 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![feature(fn_traits)]
+#![feature(step_trait)]
+#![feature(trait_upcasting)]
+#![allow(dead_code)]
 
 extern crate alloc;
 
-use core::any::Any;
-use core::fmt::Debug;
+pub mod bio;
+pub mod id;
+mod impl_block_device;
+mod prelude;
+pub mod request_queue;
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use self::{prelude::*, request_queue::BioRequestQueue};
+
 use component::init_component;
 use component::ComponentInitError;
 use jinux_frame::sync::SpinLock;
-use jinux_frame::vm::VmReader;
-use jinux_frame::vm::VmWriter;
+
 use spin::Once;
 
-pub const BLK_SIZE: usize = 512;
+pub const BLOCK_SIZE: usize = jinux_frame::config::PAGE_SIZE;
+pub const SECTOR_SIZE: usize = 512;
 
 pub trait BlockDevice: Send + Sync + Any + Debug {
-    fn read_block(&self, block_id: usize, buf: &[VmWriter]);
-    fn write_block(&self, block_id: usize, buf: &[VmReader]);
+    /// Returns a `BioRequestQueue` for this device.
+    fn request_queue(&self) -> &dyn BioRequestQueue;
     fn handle_irq(&self);
+}
+
+impl dyn BlockDevice {
+    pub fn downcast_ref<T: BlockDevice>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref::<T>()
+    }
 }
 
 pub fn register_device(name: String, device: Arc<dyn BlockDevice>) {

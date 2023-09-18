@@ -1,4 +1,3 @@
-use alloc::str;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use jinux_frame::sync::{RwLock, RwLockWriteGuard};
@@ -10,8 +9,8 @@ use super::*;
 use crate::events::IoEvents;
 use crate::fs::device::Device;
 use crate::fs::utils::{
-    DirentVisitor, FileSystem, FsFlags, Inode, InodeMode, InodeType, IoctlCmd, Metadata, PageCache,
-    SuperBlock,
+    CStr256, DirentVisitor, FileSystem, FsFlags, Inode, InodeMode, InodeType, IoctlCmd, Metadata,
+    PageCache, PageCacheBackend, SuperBlock,
 };
 use crate::prelude::*;
 use crate::process::signal::Poller;
@@ -219,7 +218,7 @@ impl Inner {
 }
 
 struct DirEntry {
-    children: SlotVec<(Str256, Arc<RamInode>)>,
+    children: SlotVec<(CStr256, Arc<RamInode>)>,
     this: Weak<RamInode>,
     parent: Weak<RamInode>,
 }
@@ -248,7 +247,7 @@ impl DirEntry {
         } else {
             self.children
                 .iter()
-                .any(|(child, _)| child.as_ref() == name)
+                .any(|(child, _)| child.as_str().unwrap() == name)
         }
     }
 
@@ -260,16 +259,16 @@ impl DirEntry {
         } else {
             self.children
                 .idxes_and_items()
-                .find(|(_, (child, _))| child.as_ref() == name)
+                .find(|(_, (child, _))| child.as_str().unwrap() == name)
                 .map(|(idx, (_, inode))| (idx + 2, inode.clone()))
         }
     }
 
     fn append_entry(&mut self, name: &str, inode: Arc<RamInode>) -> usize {
-        self.children.put((Str256::from(name), inode))
+        self.children.put((CStr256::from(name), inode))
     }
 
-    fn remove_entry(&mut self, idx: usize) -> Option<(Str256, Arc<RamInode>)> {
+    fn remove_entry(&mut self, idx: usize) -> Option<(CStr256, Arc<RamInode>)> {
         assert!(idx >= 2);
         self.children.remove(idx - 2)
     }
@@ -277,8 +276,8 @@ impl DirEntry {
     fn substitute_entry(
         &mut self,
         idx: usize,
-        new_entry: (Str256, Arc<RamInode>),
-    ) -> Option<(Str256, Arc<RamInode>)> {
+        new_entry: (CStr256, Arc<RamInode>),
+    ) -> Option<(CStr256, Arc<RamInode>)> {
         assert!(idx >= 2);
         self.children.put_at(idx - 2, new_entry)
     }
@@ -315,7 +314,7 @@ impl DirEntry {
                 .skip_while(|(offset, _)| offset < &start_idx)
             {
                 visitor.visit(
-                    name.as_ref(),
+                    name.as_str().unwrap(),
                     child.metadata().ino as u64,
                     child.metadata().type_,
                     offset,
@@ -334,36 +333,6 @@ impl DirEntry {
 
     fn is_empty_children(&self) -> bool {
         self.children.is_empty()
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
-pub struct Str256([u8; 256]);
-
-impl AsRef<str> for Str256 {
-    fn as_ref(&self) -> &str {
-        let len = self.0.iter().enumerate().find(|(_, &b)| b == 0).unwrap().0;
-        str::from_utf8(&self.0[0..len]).unwrap()
-    }
-}
-
-impl<'a> From<&'a str> for Str256 {
-    fn from(s: &'a str) -> Self {
-        let mut inner = [0u8; 256];
-        let len = if s.len() > NAME_MAX {
-            NAME_MAX
-        } else {
-            s.len()
-        };
-        inner[0..len].copy_from_slice(&s.as_bytes()[0..len]);
-        Self(inner)
-    }
-}
-
-impl core::fmt::Debug for Str256 {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(f, "{}", self.as_ref())
     }
 }
 
@@ -439,7 +408,7 @@ impl RamInode {
     }
 }
 
-impl Inode for RamInode {
+impl PageCacheBackend for RamInode {
     fn read_page(&self, _idx: usize, _frame: &VmFrame) -> Result<()> {
         // do nothing
         Ok(())
@@ -450,6 +419,12 @@ impl Inode for RamInode {
         Ok(())
     }
 
+    fn num_pages(&self) -> usize {
+        self.0.read().metadata.blocks
+    }
+}
+
+impl Inode for RamInode {
     fn page_cache(&self) -> Option<Vmo<Full>> {
         self.0
             .read()
@@ -515,8 +490,9 @@ impl Inode for RamInode {
         self.0.read().metadata.size
     }
 
-    fn resize(&self, new_size: usize) {
-        self.0.write().resize(new_size)
+    fn resize(&self, new_size: usize) -> Result<()> {
+        self.0.write().resize(new_size);
+        Ok(())
     }
 
     fn atime(&self) -> Duration {
@@ -533,6 +509,10 @@ impl Inode for RamInode {
 
     fn set_mtime(&self, time: Duration) {
         self.0.write().metadata.mtime = time;
+    }
+
+    fn ino(&self) -> u64 {
+        self.0.read().metadata.ino as _
     }
 
     fn type_(&self) -> InodeType {
@@ -780,7 +760,7 @@ impl Inode for RamInode {
             let (idx, inode) = self_dir
                 .get_entry(old_name)
                 .ok_or(Error::new(Errno::ENOENT))?;
-            self_dir.substitute_entry(idx, (Str256::from(new_name), inode));
+            self_dir.substitute_entry(idx, (CStr256::from(new_name), inode));
         } else {
             let (mut self_inode, mut target_inode) = write_lock_two_inodes(self, target);
             let self_dir = self_inode.inner.as_direntry_mut().unwrap();
