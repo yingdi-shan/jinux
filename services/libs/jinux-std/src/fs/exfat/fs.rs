@@ -17,7 +17,7 @@ pub struct ExfatFS{
     block_device: Box<dyn BlockDevice>,
     pub super_block: ExfatSuperBlock,
     root: Arc<ExfatInode>,
-    bitmap: Arc<ExfatBitmap>,
+    pub bitmap: Arc<ExfatBitmap>,
     upcase_table: Arc<ExfatUpcaseTable>,
     mount_option:ExfatMountOptions,
 

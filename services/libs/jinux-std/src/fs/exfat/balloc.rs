@@ -57,6 +57,15 @@ impl ExfatBitmap{
     pub fn set_bitmap_unused(&mut self,cluster:u32, sync:bool) -> Result<()> {
         self.set_bitmap(cluster, false, sync)
     }
+    
+    pub fn get_bitmap(&self, cluster:u32) -> Result<bool> {
+        if !self.fs().is_valid_cluster(cluster) {
+            return_errno!(Errno::EINVAL)
+        }
+
+        let entry_index = cluster - EXFAT_RESERVED_CLUSTERS;
+        Ok(self.bitvec[entry_index as usize])
+    }
 
     fn set_bitmap(&mut self,cluster:u32, bit:bool, sync:bool) -> Result<()> {
         if !self.fs().is_valid_cluster(cluster) {
