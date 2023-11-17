@@ -13,9 +13,9 @@ use crate::fs::exfat::fat::ExfatChain;
 #[derive(Debug)]
 pub struct ExfatFS{
     block_device: Box<dyn BlockDevice>,
-    super_block: ExfatSuperBlock,
+    pub super_block: ExfatSuperBlock,
     root: Arc<ExfatInode>,
-    bitmap: Arc<ExfatBitmap>
+    pub bitmap: Arc<ExfatBitmap>
     //TODO: Should add a no_std hashmap crate like hashbrown.
     //inode_cache : HashMap<Arc<ExfatInode>>
 }

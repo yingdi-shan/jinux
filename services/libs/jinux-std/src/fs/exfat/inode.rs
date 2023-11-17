@@ -6,6 +6,7 @@ use crate::fs::utils::{Inode, InodeType, PageCache};
 use super::constants::*;
 use super::dentry::ExfatDentry;
 use super::utils::{convert_dos_time_to_duration, le16_to_cpu};
+use super::fat::{FatValue, FatTrait};
 use crate::events::IoEvents;
 use crate::fs::device::Device;
 use crate::fs::utils::DirentVisitor;
@@ -201,9 +202,86 @@ impl ExfatInode {
         }
         name
     }
-
+    // if new_size > capacity, alloc more; else just set a new size
+    // 1: capacity = 0?  how to find the first cluster if no_fat_chain is set?(how to make sure big enough)
+    // 2: resize need to modify the inode struct?(&mut self)
+    // 3: when new_size < capacity, should we free some allocated but not in use clusters?
     pub fn resize(&self,new_size:usize) -> Result<()> {
-        todo!()
+        if new_size <= self.capacity {
+            //self.size = new_size;
+            return Ok(());
+        }
+        // need to alloc new clusters
+        let no_fat_chain: bool = self.flags == ALLOC_POSSIBLE|ALLOC_NO_FAT_CHAIN;
+        let fs = self.fs.upgrade().unwrap();
+        let bitmap = &fs.bitmap;
+        let sb = &fs.super_block;
+        //if new_size > self.size {
+            let cur_cluster_num: u32 = (self.size as u32 + sb.cluster_size - 1) >> sb.cluster_size_bits;
+            let need_cluster_num: u32 = (new_size as u32 + sb.cluster_size - 1) >> sb.cluster_size_bits;
+            let alloc_num = need_cluster_num - cur_cluster_num;
+            // allocate new clusters
+            if no_fat_chain {
+                // no fat used, only modify bitmap
+                let cur_end_cluster = self.start_cluster + cur_cluster_num;
+                for i in 0..alloc_num {
+                    //bitmap.set_bitmap_used(cur_end_cluster + i as u32, true)?;
+                }
+            }
+            else {
+                let mut edit_fat_cluster = self.start_cluster;
+                for i in 0..(cur_cluster_num - 1) {
+                    match fs.get_next_fat(edit_fat_cluster)? {
+                        FatValue::Data(entry) => { edit_fat_cluster = entry; }
+                        _ => return_errno_with_message!(Errno::EINVAL, "Invalid fat entry")
+                    }
+                }
+                for i in 0..alloc_num {
+                    let free_cluster = bitmap.find_free_bitmap(EXFAT_FIRST_CLUSTER)?;
+                    //bitmap.set_bitmap_used(free_cluster, true)?;
+                    fs.set_next_fat(edit_fat_cluster, FatValue::Data(free_cluster))?;
+                    edit_fat_cluster = free_cluster;
+                }
+                fs.set_next_fat(edit_fat_cluster, FatValue::EndOfChain)?;
+            }
+            //self.capacity = (need_cluster_num << sb.cluster_size_bits) as usize;
+            //self.size = new_size;
+        //}
+        /* 
+        else if new_size < self.size {
+            let trunc_size = self.size - new_size;
+            // truncate exist clusters
+            if no_fat_chain {
+                let new_end_cluster = self.start_cluster + new_size as u32;
+                for i in 0..trunc_size {
+                    bitmap.set_bitmap_unused(new_end_cluster + i as u32, true)?;
+                }
+            }
+            else {
+                let mut edit_fat_cluster = self.start_cluster;
+                for i in 0..(new_size - 1) {
+                    match fs.get_next_fat(edit_fat_cluster)? {
+                        FatValue::Data(entry) => { edit_fat_cluster = entry; }
+                        _ => return_errno_with_message!(Errno::EINVAL, "Invalid fat entry")
+                    }
+                }
+                let mut new_end_cluster = edit_fat_cluster;
+                for i in 0..trunc_size {
+                    let next_cluster: u32;
+                    match fs.get_next_fat(new_end_cluster)? {
+                        FatValue::Data(entry) => { next_cluster = entry; }
+                        _ => return_errno_with_message!(Errno::EINVAL, "Invalid fat entry")
+                    }
+                    bitmap.set_bitmap_unused(next_cluster, true)?;
+                    fs.set_next_fat(new_end_cluster, FatValue::Free)?;
+                    new_end_cluster = next_cluster;
+                }
+                fs.set_next_fat(new_end_cluster, FatValue::EndOfChain)?;
+            }
+            self.size = new_size;
+        }
+        */
+        Ok(())
     }
 
     pub fn page_cache(&self) -> &PageCache {
