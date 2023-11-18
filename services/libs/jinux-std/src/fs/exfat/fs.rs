@@ -15,9 +15,9 @@ use crate::fs::exfat::fat::ExfatChain;
 #[derive(Debug)]
 pub struct ExfatFS{
     block_device: Box<dyn BlockDevice>,
-    pub super_block: ExfatSuperBlock,
+    super_block: ExfatSuperBlock,
     root: Arc<ExfatInode>,
-    pub bitmap: Arc<ExfatBitmap>,
+    bitmap: Arc<ExfatBitmap>,
     upcase_table: Arc<ExfatUpcaseTable>,
     mount_option:ExfatMountOptions,
 
@@ -159,6 +159,10 @@ impl ExfatFS{
         self.super_block
     }
 
+    pub fn bitmap(&self) -> Weak<ExfatBitmap> {
+        Arc::downgrade(&self.bitmap)
+    }
+
     pub fn root_inode(&self) -> Result<Arc<ExfatInode>> {
         unimplemented!()
     }
@@ -169,6 +173,10 @@ impl ExfatFS{
 
     pub fn is_valid_cluster(&self,cluster:u32) -> bool {
         cluster >= EXFAT_RESERVED_CLUSTERS && cluster < self.super_block.num_clusters
+    }
+
+    pub fn is_valid_cluster_chunk(&self,start_cluster:u32, cluster_num:u32) -> bool {
+        start_cluster >= EXFAT_RESERVED_CLUSTERS && start_cluster + cluster_num - 1 < self.super_block.num_clusters
     }
 
     pub fn set_volume_dirty(&mut self) {
