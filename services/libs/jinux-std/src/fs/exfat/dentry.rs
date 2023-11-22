@@ -278,7 +278,7 @@ pub struct ExfatFileDentry {
      //Calculated on file and secondary entries.
     pub(super) checksum: u16,                       // checksum of all directory entries in the given set excluding this field 
 
-    pub(super) attribute: u16,
+    pub(super) attribute: u16,                      // bit0: read-only; bit1: hidden; bit2: system; bit4: directory; bit5: archive
     pub(super) reserved1: u16,
 
     pub(super) create_time: u16,                    // all rests are times
