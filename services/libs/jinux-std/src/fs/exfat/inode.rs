@@ -576,11 +576,11 @@ impl ExfatInodeInner {
         Ok(())
     }
 
-    pub fn remove_contents (&mut self) ->Result<()> {
+    pub fn remove_contents_recursive (&mut self) ->Result<()> {
         match self.type_ {
             TYPE_FILE => {
                 // for a single file, just remove all clusters
-                self.resize(0)?;
+                self.locked_resize(0)?;
             }
             TYPE_DIR => {
                 let fs = self.fs();
@@ -601,7 +601,7 @@ impl ExfatInodeInner {
                             let inode = ExfatInode::read_inode(fs.clone(), 
                                         ExfatChain {dir: chain.dir, size: chain.size, flags: chain.flags}, 
                                         entry, 0)?;
-                            inode.0.write().remove_contents()?;
+                            inode.0.write().remove_contents_recursive()?;
                             increasement += file.num_secondary as u32;
                         }
                         ExfatDentry::Bitmap(_) => {
@@ -625,6 +625,7 @@ impl ExfatInodeInner {
                         }
                     }
                 }
+                self.locked_resize(0)?;
             }
             _ => todo!()
         };
@@ -684,7 +685,62 @@ impl ExfatInodeInner {
 
         
     }
+
+    // return (target inode, dentries start offset, dentries len)
+    fn lookup_by_name(&mut self, name:&str) -> Result<(Arc<ExfatInode>, usize, usize)>{
+        let sub_dir = self.num_subdir;
+        let mut names:Vec<String> = vec![];
+        let mut offset = 0;
+        for i in 0..sub_dir {
+            let (inode,next) = self.readdir_at(offset, &mut names)?;
+            if names.last().unwrap().eq(name) {
+                return Ok((inode, offset, next - offset))
+            }
+            offset = next;
+        }
+        return_errno!(Errno::ENOENT)
+    }
+
+    fn is_empty_dir(&self) -> Result<bool> {
+        let fs = self.fs();
+        let iterator = ExfatDentryIterator::from(Arc::downgrade(&fs),0,ExfatChain{
+            dir:self.start_cluster,
+            size:0,
+            flags:self.flags
+        });
+
+        for dentry_result in iterator {
+            let dentry = dentry_result?;
+            match dentry {
+                ExfatDentry::UnUsed => {}
+                ExfatDentry::Deleted => {}
+                _ => {return Ok(false);}
+            }
+        }
+        Ok(true)
+    }
     
+    // remove clusters in this file(or dir), return the dentry position in parent dir
+    fn get_dentry_position(&mut self, name:&str, remove: bool) -> Result<(usize, usize)> {
+        if !self.type_ == TYPE_DIR {
+            return_errno!(Errno::ENOTDIR)
+        }
+
+        let fs = self.fs();
+        let guard = fs.lock();
+
+        let (inode, offset, len) = self.lookup_by_name(name)?;
+        if inode.type_() == InodeType::Dir && !self.is_empty_dir()? {
+            return_errno!(Errno::ENOTEMPTY)
+        }
+
+        if remove {
+            inode.resize(0);
+        }
+
+        Ok((offset, len))
+    }
+
 }
 
 impl Inode for ExfatInode {
@@ -900,75 +956,45 @@ impl Inode for ExfatInode {
 
     fn unlink(&self, name: &str) -> Result<()> {
         let mut inner = self.0.write();
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR)
-        }
-
-        let cur_dir = ExfatChain{dir: inner.start_cluster, size: 0, flags: inner.flags};
-        let search_result = inner.fs().get_dentry_set_begin_by_name(&cur_dir, (inner.size_on_disk >> DENTRY_SIZE_BITS) as u32, name);
-
-        if search_result == None {
-            // TODO: error code
-            return_errno_with_message!(Errno::EINVAL, "File not found")
-        }
-
-        let (dentry_set_begin, dentry_set_size) = search_result.unwrap();
-        // this inode is a temporary inode
-        let inode = ExfatInode::read_inode(inner.fs(), cur_dir, dentry_set_begin, 0)?;
-        if inode.type_() != InodeType::File {
-            // TODO: error code
-            return_errno_with_message!(Errno::EINVAL, "Not a file")
-        }
-        // delete the file data
-        inode.0.write().remove_contents()?;
-
-        // remove the corresponding dentries
-        let buf_size: usize = inner.size_on_disk - ((dentry_set_begin + dentry_set_size) as usize) << DENTRY_SIZE_BITS;
-        let mut buf = Vec::<u8>::with_capacity(buf_size);
-        // first, read the tailing dentries
-        self.read_at(((dentry_set_begin + dentry_set_size) as usize) << DENTRY_SIZE_BITS, &mut buf)?;
-        // then, write back rest dentries & release excess memory
-        self.write_at((dentry_set_begin as usize) << DENTRY_SIZE_BITS, &buf)?;
-        inner.resize(buf_size + (dentry_set_begin << DENTRY_SIZE_BITS) as usize)?;
         
+        let fs = inner.fs();
+        let guard = fs.lock();
+
+        let (offset, len) = inner.get_dentry_position(name, true)?;
+        let mut buf = Vec::<u8>::with_capacity(len);
+        self.read_at(offset, &mut buf)?;
+        for i in 0..buf.len() {
+            buf[i] &= 0x7F;
+        }
+        self.write_at(offset, &buf)?;
         Ok(())
     }
 
     fn rmdir(&self, name: &str) -> Result<()> {
         let mut inner = self.0.write();
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR)
-        }
         
-        // this inode is a temporary inode
-        let inode = self.lookup(name)?;
-        if inode.type_() != InodeType::Dir {
-            // TODO: error code
-            return_errno_with_message!(Errno::EINVAL, "Not a directory")
+        let fs = inner.fs();
+        let guard = fs.lock();
+
+        let (offset, len) = inner.get_dentry_position(name, true)?;
+        let mut buf = Vec::<u8>::with_capacity(len);
+        self.read_at(offset, &mut buf)?;
+        for i in 0..buf.len() {
+            buf[i] &= 0x7F;
         }
-        // delete the directory data
-        inode.resize(0);
-        
+        self.write_at(offset, &buf)?;
         Ok(())
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
         //FIXME: Readdir should be immutable instead of mutable, but there will be no performance issues due to the global fs lock.
         let mut inner = self.0.write();
-        let sub_dir = inner.num_subdir;
+
         let fs = inner.fs();
         let guard = fs.lock();
 
-        let mut names:Vec<String> = vec![];
-        let mut offset = 0;
-        for i in 0..sub_dir {
-            let (inode,next) = inner.readdir_at(offset, &mut names)?;
-            if names.last().unwrap().eq(name) {
-                return Ok(inode)
-            }
-            offset = next;
-        }
-        return_errno!(Errno::ENOENT)
+        let (inode, _, _) = inner.lookup_by_name(name)?;
+        Ok(inode)
     }
 
     fn rename(&self, old_name: &str, target: &Arc<dyn Inode>, new_name: &str) -> Result<()> {
