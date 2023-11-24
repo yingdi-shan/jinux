@@ -142,17 +142,21 @@ impl Iterator for ExfatDentryIterator {
             match dentry_result.unwrap() {
                 ExfatDentry::UnUsed => None,
                 dentry => {
+                    let mut increasement: u32 = 1;
+                    if let ExfatDentry::File(primary_dentry) = dentry {
+                        increasement += primary_dentry.num_secondary as u32;
+                    }
                     // Instead of calling get_dentry directly, update the chain and entry of the iterator to reduce the read of FAT table. 
-                    if self.entry + 1 == self.fs.upgrade().unwrap().super_block().dentries_per_clu {
-                        self.entry = 0;
+                    self.entry += increasement;
+                    while self.entry >= self.fs.upgrade().unwrap().super_block().dentries_per_clu {
+                        self.entry -= self.fs.upgrade().unwrap().super_block().dentries_per_clu;
+                        // should consider the flags field in chain??
                         let next_fat = self.fs.upgrade().unwrap().get_next_fat(self.chain.dir);
                         if next_fat.is_err() {
                             self.has_error = true;
                             return Some(Result::Err(next_fat.unwrap_err()));
                         }
                         self.chain.dir = next_fat.unwrap().into()
-                    } else {
-                        self.entry += 1;
                     }
                     Some(Ok(dentry))
                 }
@@ -203,6 +207,30 @@ impl ExfatFS{
 
     }
 
+
+    pub fn get_dentry_set_begin_by_name(&self, parent_dir_start: &ExfatChain, total_entry: u32, name: &str) -> Option<(u32,u32)> {
+        let mut entry: u32 = 0;
+        let tar_name = ExfatDentryName::from(name);
+
+        while entry < total_entry {
+            let dentry_set = self.get_dentry_set(parent_dir_start, entry, ES_ALL_ENTRIES);
+            match dentry_set {
+                Ok(dentries) => {
+                    let cur_name = read_name_from_dentry_set(&dentries);
+                    if cur_name.equal_to(&tar_name) {
+                        return Some((entry, dentries.len() as u32));
+                    }
+                    entry += dentries.len() as u32;
+                }
+                _ => {
+                    entry += 1;
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn put_dentry_set(&self,dentry_set:&[ExfatDentry],parent_dir:&ExfatChain,entry:u32,sync:bool) -> Result<()>{
         let dentry_offset = self.find_dentry_location(parent_dir, entry)?;
         let mut buf = vec![];
@@ -217,7 +245,42 @@ impl ExfatFS{
     
     fn validate_dentry(&self,dentry:&ExfatDentry, status:ExfatValidateDentryMode) -> Result<ExfatValidateDentryMode>{
         //TODO: Validate the status of dentry by using a state machine.
-        return Ok(status);
+        match status {
+            ExfatValidateDentryMode::Started => {
+                match dentry {
+                    ExfatDentry::File(_) => 
+                                        {return Ok(ExfatValidateDentryMode::GetFileEntry);}
+                    ExfatDentry::Bitmap(_) => 
+                                        {return Ok(ExfatValidateDentryMode::GetCriticalSecEntry);}
+                    ExfatDentry::Upcase(_) => 
+                                        {return Ok(ExfatValidateDentryMode::GetCriticalSecEntry);}
+                    _ => {return_errno!(Errno::EINVAL)}
+                }
+            }
+            ExfatValidateDentryMode::GetFileEntry => {
+                match dentry {
+                    ExfatDentry::Stream(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetStreamEntry);}
+                    _ => {return_errno!(Errno::EINVAL)}
+                }
+            }
+            ExfatValidateDentryMode::GetStreamEntry => {
+                match dentry {
+                    ExfatDentry::Name(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetNameEntry);}
+                    _ => {return_errno!(Errno::EINVAL)}
+                }
+            }
+            ExfatValidateDentryMode::GetNameEntry => {
+                match dentry {
+                    ExfatDentry::Name(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetNameEntry);}
+                    _ => {return_errno!(Errno::EINVAL)}
+                }
+            }
+            ExfatValidateDentryMode::GetCriticalSecEntry => {return_errno!(Errno::EINVAL)}
+            ExfatValidateDentryMode::GetBenignSecEntry => {return_errno!(Errno::EINVAL)}
+        }
     }
 
     /// read the {entry}th DENTRY after the position in 'parent_dir'(now only the cluster info valid?)
