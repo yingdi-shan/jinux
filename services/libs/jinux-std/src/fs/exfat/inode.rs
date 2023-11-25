@@ -470,7 +470,7 @@ impl ExfatInodeInner {
     }
 
     // append clusters at the end of file, return the first allocated cluster
-    fn alloc_cluster(&mut self,num_to_be_allocated:u32,sync_bitmap:bool) -> Result<u32> {
+    fn alloc_cluster(&mut self, need_cluster_num:u32, sync_bitmap:bool) -> Result<u32> {
         
         let fs = self.fs();
 
@@ -479,7 +479,7 @@ impl ExfatInodeInner {
 
         let sb = fs.super_block();
         let cur_cluster_num = (self.size_on_disk + sb.cluster_size as usize - 1) >> sb.cluster_size_bits;
-        let no_fat_chain: bool = self.flags == ALLOC_NO_FAT_CHAIN;
+        let num_to_be_allocated = need_cluster_num - cur_cluster_num as u32;
         let mut alloc_start_cluster: u32;
 
         // if current capacity is 0(no start_cluster), this means we can choose a allocation type
@@ -507,7 +507,7 @@ impl ExfatInodeInner {
         }
         // append the exist clusters
         let mut trans_from_no_fat = false;
-        if no_fat_chain {
+        if self.flags == ALLOC_NO_FAT_CHAIN {
             // first, check for if there are enough following clusters.
             // if not, we can give up continuous allocation and turn to fat allocation
             alloc_start_cluster = self.start_cluster + cur_cluster_num as u32;
@@ -539,6 +539,39 @@ impl ExfatInodeInner {
         return Ok(alloc_start_cluster);
     }
     
+    // free cluster in range [start_id...start_id + free_num), allocation mode is "flags"
+    // this function not related to specific inode
+    fn free_cluster_plus(&mut self, start_cluster:u32, free_num:u32, flags:u8, sync_bitmap:bool) -> Result<()> {
+        let fs = self.fs();
+
+        let bitmap_binding = fs.bitmap();
+        let mut bitmap = bitmap_binding.lock();
+
+        if flags == ALLOC_NO_FAT_CHAIN {
+            bitmap.set_bitmap_unused_chunk(start_cluster, free_num, sync_bitmap)?;
+        }
+        else {
+            self.free_cluster_fat(start_cluster, free_num, sync_bitmap, &mut bitmap)?;
+        }
+        Ok(())
+    }
+
+    fn free_cluster(&mut self, need_cluster_num:u32, sync_bitmap:bool) -> Result<()> {
+        let fs = self.fs();
+
+        let sb = fs.super_block();
+        let cur_cluster_num = (self.size_on_disk + sb.cluster_size as usize - 1) >> sb.cluster_size_bits;
+        let trunc_num = cur_cluster_num as u32 - need_cluster_num;
+        let trunc_start_cluster = self.get_or_allocate_cluster_on_disk(need_cluster_num as u32, false)?;
+        self.free_cluster_plus(trunc_start_cluster, trunc_num,  self.flags, sync_bitmap)?;
+        if self.flags !=ALLOC_NO_FAT_CHAIN && need_cluster_num != 0{
+            let new_end_cluster = self.get_or_allocate_cluster_on_disk(need_cluster_num - 1, false)?;
+            fs.set_next_fat(new_end_cluster, FatValue::EndOfChain)?;
+        }
+
+        Ok(())
+    }
+
     pub fn locked_resize(&mut self,new_size:usize) -> Result<()> {
         let binding = self.fs();
         let guard = binding.lock();
@@ -551,26 +584,11 @@ impl ExfatInodeInner {
         let need_cluster_num= (new_size + sb.cluster_size as usize - 1) >> sb.cluster_size_bits;
         if need_cluster_num > cur_cluster_num {
             // need to allocate new clusters
-            let alloc_num = need_cluster_num - cur_cluster_num;
-            self.alloc_cluster(alloc_num as u32, true)?;
+            self.alloc_cluster(need_cluster_num as u32, true)?;
         }
         else if need_cluster_num < cur_cluster_num {
-            let bitmap_binding = fs.bitmap();
-            let mut bitmap = bitmap_binding.lock();
-
-            let trunc_num = cur_cluster_num - need_cluster_num;
-            // need to truncate exist clusters
-            let trunc_start_cluster = self.get_or_allocate_cluster_on_disk(need_cluster_num as u32, false)?;
-            if no_fat_chain {
-                bitmap.set_bitmap_unused_chunk(trunc_start_cluster, trunc_num as u32, true)?;
-            }
-            else {
-                self.free_cluster_fat(trunc_start_cluster, trunc_num as u32, true, &mut bitmap)?;
-                if need_cluster_num != 0 {
-                    let new_end_cluster = self.get_or_allocate_cluster_on_disk(need_cluster_num as u32 - 1, false)?;
-                    fs.set_next_fat(new_end_cluster, FatValue::EndOfChain)?;
-                }
-            }
+            // need to free exist clusters
+            self.free_cluster(need_cluster_num as u32, true)?;
         }
         self.size_on_disk = new_size;
         Ok(())
@@ -642,10 +660,102 @@ impl ExfatInodeInner {
         Ok(())
     }
 
+    fn read_bytes(&mut self, offset: usize, buf: &mut [u8]) -> Result<usize> {
+        let file_size = self.size_on_disk;
+        let block_size = self.fs().super_block().sector_size as usize;
+        // [start_offset, end_offset)
+        let start_offset = file_size.min(offset);
+        let end_offset = file_size.min(offset + buf.len());
+        let len_ = end_offset - start_offset;
+
+        let start = start_offset.align_down(block_size);
+        let end = end_offset.align_up(block_size);
+        let start_idx = start/block_size;
+        let end_idx = end/block_size;
+
+        let frame = VmFrameVec::allocate(VmAllocOptions::new(1).uninit(false).can_dma(true)).unwrap().pop().unwrap();
+
+        // if all bytes are in one block
+        if start_idx == end_idx - 1 {
+            self.read_block(start_idx, &frame)?;
+            frame.read_bytes(start_offset % block_size, &mut buf[0..len_])?;
+            return Ok(len_);
+        }
+
+        let mut buf_offset = 0;
+        let mut len;
+        for idx in start_idx..end_idx {
+            self.read_block(idx, &frame)?;
+            if idx == start_idx {
+                len = block_size - start_offset % block_size;
+                frame.read_bytes(start_offset % block_size, &mut buf[buf_offset..buf_offset + len])?; 
+            }
+            else if idx == end_idx - 1 {
+                len = end_offset % block_size;
+                frame.read_bytes(0, &mut buf[buf_offset.. buf_offset + len])?;
+            }
+            else {
+                len = block_size;
+                frame.read_bytes(0, &mut buf[buf_offset.. buf_offset + len])?;
+            }
+            buf_offset += len;
+        }
+
+        Ok(len_)
+    }
+
     fn write_block(&mut self, idx: usize, frame: &VmFrame) -> Result<()> {
         let bid = self.locked_get_or_allocate_sector_id(idx, true,false)?;
         self.fs().block_device().write_block(bid, frame)?;
         Ok(())
+    }
+
+    fn write_bytes(&mut self, offset: usize, buf: &[u8]) -> Result<usize> {
+        let file_size = self.size_on_disk;
+        let block_size = self.fs().super_block().sector_size as usize;
+        // [start_offset, end_offset)
+        let start_offset = file_size.min(offset);
+        let end_offset = file_size.min(offset + buf.len());
+        let len_ = end_offset - start_offset;
+
+        let start = start_offset.align_down(block_size);
+        let end = end_offset.align_up(block_size);
+        let start_idx = start/block_size;
+        let end_idx = end/block_size;
+
+        let frame = VmFrameVec::allocate(VmAllocOptions::new(1).uninit(false).can_dma(true)).unwrap().pop().unwrap();
+
+        // if all bytes are in one block
+        if start_idx == end_idx - 1 {
+            // different from read_bytes, write_bytes may need to read from disk first
+            self.read_block(start_idx, &frame)?;
+            frame.write_bytes(start_offset % block_size, &buf[0..len_])?;
+            self.write_block(start_idx, &frame)?;
+            return Ok(len_);
+        }
+
+        let mut buf_offset = 0;
+        let mut len;
+        for idx in start_idx..end_idx {
+            if idx == start_idx {
+                self.read_block(idx, &frame)?;
+                len = block_size - start_offset % block_size;
+                frame.write_bytes(start_offset % block_size, &buf[buf_offset..buf_offset + len])?; 
+            }
+            else if idx == end_idx - 1 {
+                self.read_block(idx, &frame)?;
+                len = end_offset % block_size;
+                frame.write_bytes(0, &buf[buf_offset.. buf_offset + len])?;
+            }
+            else {
+                len = block_size;
+                frame.write_bytes(0, &buf[buf_offset.. buf_offset + len])?;
+            }
+            self.write_block(idx, &frame)?;
+            buf_offset += len;
+        }
+
+        Ok(len_)
     }
 
     fn type_(&self) -> InodeType {
@@ -686,6 +796,7 @@ impl ExfatInodeInner {
         
     }
 
+    // look up a target with "name", cur inode represent a dir
     // return (target inode, dentries start offset, dentries len)
     fn lookup_by_name(&mut self, name:&str) -> Result<(Arc<ExfatInode>, usize, usize)>{
         let sub_dir = self.num_subdir;
@@ -701,9 +812,9 @@ impl ExfatInodeInner {
         return_errno!(Errno::ENOENT)
     }
 
+    // only valid for directory, check if the dir is empty
     fn is_empty_dir(&self) -> Result<bool> {
-        let fs = self.fs();
-        let iterator = ExfatDentryIterator::from(Arc::downgrade(&fs),0,ExfatChain{
+        let iterator = ExfatDentryIterator::from(Arc::downgrade(&self.fs()),0,ExfatChain{
             dir:self.start_cluster,
             size:0,
             flags:self.flags
@@ -720,27 +831,32 @@ impl ExfatInodeInner {
         Ok(true)
     }
     
-    // remove clusters in this file(or dir), return the dentry position in parent dir
-    fn get_dentry_position(&mut self, name:&str, remove: bool) -> Result<(usize, usize)> {
-        if !self.type_ == TYPE_DIR {
-            return_errno!(Errno::ENOTDIR)
+    // delete dentries for cur dir
+    fn delete_dentry_set(&mut self, offset: usize, len: usize) ->Result<()> {
+        let mut buf = Vec::<u8>::with_capacity(len);
+        self.read_bytes(offset, &mut buf)?;
+
+        let dentry_num = len/DENTRY_SIZE;
+        let mut buf_offset = 0;
+        let cluster_size = self.fs().super_block().cluster_size as usize;
+        for i in 0..dentry_num {
+            // delete cluster chain if needed
+            let dentry = ExfatDentry::try_from(&buf[buf_offset..buf_offset + DENTRY_SIZE])?;
+            match dentry {
+                ExfatDentry::VendorAlloc(vendor_alloc) => {
+                    self.free_cluster_plus(vendor_alloc.start_cluster, (vendor_alloc.size as usize/cluster_size) as u32, 
+                                            vendor_alloc.flags, true)?;
+                }
+                _ => {}
+            }
+            
+            // mark this dentry deleted
+            buf[buf_offset] &= 0x7F;
+            buf_offset += DENTRY_SIZE;
         }
-
-        let fs = self.fs();
-        let guard = fs.lock();
-
-        let (inode, offset, len) = self.lookup_by_name(name)?;
-        if inode.type_() == InodeType::Dir && !self.is_empty_dir()? {
-            return_errno!(Errno::ENOTEMPTY)
-        }
-
-        if remove {
-            inode.resize(0);
-        }
-
-        Ok((offset, len))
+        self.write_bytes(offset, &buf)?;
+        Ok(())
     }
-
 }
 
 impl Inode for ExfatInode {
@@ -956,39 +1072,56 @@ impl Inode for ExfatInode {
 
     fn unlink(&self, name: &str) -> Result<()> {
         let mut inner = self.0.write();
-        
+        if inner.type_() != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR)
+        }
+
         let fs = inner.fs();
         let guard = fs.lock();
 
-        let (offset, len) = inner.get_dentry_position(name, true)?;
-        let mut buf = Vec::<u8>::with_capacity(len);
-        self.read_at(offset, &mut buf)?;
-        for i in 0..buf.len() {
-            buf[i] &= 0x7F;
+        let (inode, offset, len) = inner.lookup_by_name(name)?;
+        if inode.type_() != InodeType::File {
+            // todo: error code
+            return_errno_with_message!(Errno::EINVAL, "Not a file")
         }
-        self.write_at(offset, &buf)?;
+
+        inode.resize(0);
+        
+        inner.delete_dentry_set(offset, len)?;
         Ok(())
     }
 
     fn rmdir(&self, name: &str) -> Result<()> {
         let mut inner = self.0.write();
-        
+        if inner.type_() != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR)
+        }
+
         let fs = inner.fs();
         let guard = fs.lock();
 
-        let (offset, len) = inner.get_dentry_position(name, true)?;
-        let mut buf = Vec::<u8>::with_capacity(len);
-        self.read_at(offset, &mut buf)?;
-        for i in 0..buf.len() {
-            buf[i] &= 0x7F;
+        let (inode, offset, len) = inner.lookup_by_name(name)?;
+        if inode.type_() != InodeType::Dir {
+            // todo: error code
+            return_errno_with_message!(Errno::EINVAL, "Not a Directory")
         }
-        self.write_at(offset, &buf)?;
+        else if !inode.0.read().is_empty_dir()? {
+            // check if directory to be deleted is empty
+            return_errno!(Errno::ENOTEMPTY)
+        }
+
+        inode.resize(0);
+        
+        inner.delete_dentry_set(offset, len)?;
         Ok(())
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
         //FIXME: Readdir should be immutable instead of mutable, but there will be no performance issues due to the global fs lock.
         let mut inner = self.0.write();
+        if inner.type_() != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR)
+        }
 
         let fs = inner.fs();
         let guard = fs.lock();

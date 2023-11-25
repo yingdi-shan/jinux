@@ -248,7 +248,7 @@ impl ExfatFS{
         Ok(())
     }
 
-    
+    // Valid terminal state include: GetCriticalSecEntry, GetNameEntry, GetBenignSecEntry
     fn validate_dentry(&self,dentry:&ExfatDentry, status:ExfatValidateDentryMode) -> Result<ExfatValidateDentryMode>{
         //TODO: Validate the status of dentry by using a state machine.
         match status {
@@ -256,6 +256,7 @@ impl ExfatFS{
                 match dentry {
                     ExfatDentry::File(_) => 
                                         {return Ok(ExfatValidateDentryMode::GetFileEntry);}
+                    // what should return for bitmap & upcase table
                     ExfatDentry::Bitmap(_) => 
                                         {return Ok(ExfatValidateDentryMode::GetCriticalSecEntry);}
                     ExfatDentry::Upcase(_) => 
@@ -273,7 +274,18 @@ impl ExfatFS{
             ExfatValidateDentryMode::GetStreamEntry => {
                 match dentry {
                     ExfatDentry::Name(_) =>
-                                        {return Ok(ExfatValidateDentryMode::GetNameEntry);}
+                                        {return Ok(ExfatValidateDentryMode::GetCriticalSecEntry);}
+                    _ => {return_errno!(Errno::EINVAL)}
+                }
+            }
+            ExfatValidateDentryMode::GetCriticalSecEntry => {
+                match dentry {
+                    ExfatDentry::Name(_) => 
+                                        {return  Ok(ExfatValidateDentryMode::GetNameEntry);}
+                    ExfatDentry::VendorExt(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetBenignSecEntry);}
+                    ExfatDentry::VendorAlloc(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetBenignSecEntry);}
                     _ => {return_errno!(Errno::EINVAL)}
                 }
             }
@@ -281,11 +293,22 @@ impl ExfatFS{
                 match dentry {
                     ExfatDentry::Name(_) =>
                                         {return Ok(ExfatValidateDentryMode::GetNameEntry);}
+                    ExfatDentry::VendorExt(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetBenignSecEntry);}
+                    ExfatDentry::VendorAlloc(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetBenignSecEntry);}
                     _ => {return_errno!(Errno::EINVAL)}
                 }
             }
-            ExfatValidateDentryMode::GetCriticalSecEntry => {return_errno!(Errno::EINVAL)}
-            ExfatValidateDentryMode::GetBenignSecEntry => {return_errno!(Errno::EINVAL)}
+            ExfatValidateDentryMode::GetBenignSecEntry => {
+                match dentry {
+                    ExfatDentry::VendorExt(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetBenignSecEntry);}
+                    ExfatDentry::VendorAlloc(_) =>
+                                        {return Ok(ExfatValidateDentryMode::GetBenignSecEntry);}
+                    _ => {return_errno!(Errno::EINVAL)}
+                }
+            }
         }
     }
 
