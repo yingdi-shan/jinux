@@ -245,20 +245,6 @@ impl ExfatBitmap{
     }
 
 
-    /* 
-    fn set_bitmap(&mut self,cluster:u32, bit:bool, sync:bool) -> Result<()> {
-        if !self.fs().is_valid_cluster(cluster) {
-            return_errno!(Errno::EINVAL)
-        }
-
-        let entry_index = cluster - EXFAT_RESERVED_CLUSTERS;
-        self.bitvec.set(entry_index as usize, bit);
-
-        self.write_bitmap_byte_to_disk(entry_index, sync)?;
-        Ok(())
-    }
-    */
-
     fn set_bitmap_chunk(&mut self, start_cluster:u32, cluster_num:u32, bit:bool, sync:bool) -> Result<()> {
         if !self.fs().is_valid_cluster_chunk(start_cluster, cluster_num) {
             return_errno!(Errno::EINVAL)
@@ -273,18 +259,6 @@ impl ExfatBitmap{
         Ok(())
     }
 
-    /* 
-    fn write_bitmap_byte_to_disk(&self,entry_index:u32, sync:bool) -> Result<()> {
-        let byte_off:usize = entry_index as usize / core::mem::size_of::<u8>();
-        let bytes:&[u8] = self.bitvec.as_raw_slice();
-        let byte = bytes[byte_off];
-        
-        let byte_off_on_disk = self.fs().cluster_to_off(self.map_cluster) + byte_off;
-        
-        let _ = self.fs().block_device().write_at(byte_off_on_disk, &[byte]);
-        Ok(())
-    }
-    */
 
     fn write_bitmap_chunk_to_disk(&self, start_index:u32, cluster_num:u32, sync:bool) -> Result<()> {
         let start_byte_off:usize = start_index as usize / core::mem::size_of::<u8>();
@@ -294,7 +268,8 @@ impl ExfatBitmap{
         
         let byte_off_on_disk = self.fs().cluster_to_off(self.map_cluster) + start_byte_off;
         
-        let _ = self.fs().block_device().write_at(byte_off_on_disk, byte_chunk);
+        //FIXME: We should write into the FAT Cluster chain.
+        self.fs().block_device().write_at(byte_off_on_disk, byte_chunk)?;
         Ok(())
     }
 

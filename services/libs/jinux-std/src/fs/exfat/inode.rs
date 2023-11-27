@@ -6,7 +6,7 @@ use crate::fs::exfat::utils::make_mode;
 use crate::fs::utils::{Inode, InodeType, PageCache, Metadata};
 use crate::time::now_as_duration;
 
-use super::balloc::ExfatBitmap;
+use super::bitmap::ExfatBitmap;
 use super::block_device::is_block_aligned;
 use super::constants::*;
 use super::dentry::{ExfatDentry, update_checksum_for_dentry_set, ExfatFileDentry, ExfatStreamDentry, ExfatNameDentry};
@@ -27,9 +27,9 @@ use jinux_rights::Full;
 pub(super) use align_ext::AlignExt;
 
 #[derive(Default, Debug)]
-pub struct ExfatDentryName(Vec<u16>);
+pub struct ExfatName(Vec<u16>);
 
-impl ExfatDentryName {
+impl ExfatName {
     pub fn push(&mut self, value: u16) {
         //TODO: should use upcase table.
         self.0.push(value);
@@ -46,13 +46,13 @@ impl ExfatDentryName {
 
     pub fn from(name: &str) -> Self {
         //TODO: should use upcase table.
-        ExfatDentryName {
+        ExfatName {
             0: name.encode_utf16().collect(),
         }
     }
 
     pub fn new() -> Self {
-        ExfatDentryName { 0: Vec::new() }
+        ExfatName { 0: Vec::new() }
     }
 
     pub fn to_dentries(&self) -> Vec<ExfatDentry> {
@@ -72,7 +72,7 @@ impl ExfatDentryName {
     }
 }
 
-impl ToString for ExfatDentryName {
+impl ToString for ExfatName {
     fn to_string(&self) -> String {
         String::from_utf16_lossy(&self.0)
     }
@@ -235,7 +235,7 @@ pub struct ExfatInodeInner{
     mode:InodeMode,
 
     //exFAT uses UTF-16 encoding, rust use utf-8 for string processing.
-    name: ExfatDentryName,
+    name: ExfatName,
 
     page_cache:PageCache,
 
@@ -261,7 +261,7 @@ impl ExfatInodeInner {
             ctime:Duration::default(),
             num_subdir:0,
             mode:InodeMode::empty(),
-            name:ExfatDentryName::default(),
+            name:ExfatName::default(),
             fs: Weak::default(),
             page_cache:PageCache::new(Weak::<ExfatInode>::default()).unwrap()
         }
@@ -424,11 +424,11 @@ impl ExfatInodeInner {
                 alloc_start_cluster = cur_cluster;
             }
             else {
-                fs.set_next_fat(prev_cluster, FatValue::Data(cur_cluster))?;
+                fs.write_next_fat(prev_cluster, FatValue::Next(cur_cluster))?;
             }
             prev_cluster = cur_cluster;
         }
-        fs.set_next_fat(prev_cluster, FatValue::EndOfChain)?;
+        fs.write_next_fat(prev_cluster, FatValue::EndOfChain)?;
         Ok(alloc_start_cluster)
     }
 
@@ -438,8 +438,8 @@ impl ExfatInodeInner {
         let mut cur_cluster = start_cluster;
         for i in 0..free_num {
             bitmap.set_bitmap_unused(cur_cluster, sync_bitmap)?;
-            match fs.get_next_fat(cur_cluster)? {
-                FatValue::Data(data) => { 
+            match fs.read_next_fat(cur_cluster)? {
+                FatValue::Next(data) => { 
                     cur_cluster = data;
                 }
                 _ => return_errno_with_message!(Errno::EINVAL, "Invalid fat entry")
@@ -470,9 +470,9 @@ impl ExfatInodeInner {
         }
         else {
             for i in 0..cluster {
-                let fat_value =  fs.get_next_fat(cluster_id)?;
+                let fat_value =  fs.read_next_fat(cluster_id)?;
                 match fat_value {
-                    FatValue::Data(new_id) => { cluster_id = new_id; }
+                    FatValue::Next(new_id) => { cluster_id = new_id; }
                     _ => { return_errno_with_message!(Errno::EINVAL, "invaild fat entry"); }
                 }
             }
@@ -529,9 +529,9 @@ impl ExfatInodeInner {
             else {
                 // fill in fat for already allocated part
                 for i in 0..cur_cluster_num - 1 {
-                    fs.set_next_fat(self.start_cluster + i as u32, FatValue::Data(self.start_cluster + i as u32 + 1))?;
+                    fs.write_next_fat(self.start_cluster + i as u32, FatValue::Next(self.start_cluster + i as u32 + 1))?;
                 }
-                fs.set_next_fat(self.start_cluster + cur_cluster_num  as u32 - 1, FatValue::EndOfChain)?;
+                fs.write_next_fat(self.start_cluster + cur_cluster_num  as u32 - 1, FatValue::EndOfChain)?;
                 self.flags = ALLOC_FAT_CHAIN;
                 trans_from_no_fat = true;
             }
@@ -545,7 +545,7 @@ impl ExfatInodeInner {
             cur_end_cluster = self.get_or_allocate_cluster_on_disk(cur_cluster_num as u32 - 1, false)?;
         }
         alloc_start_cluster = self.alloc_cluster_fat(num_to_be_allocated, sync_bitmap,&mut bitmap)?;
-        fs.set_next_fat(cur_end_cluster, FatValue::Data(alloc_start_cluster))?;
+        fs.write_next_fat(cur_end_cluster, FatValue::Next(alloc_start_cluster))?;
         return Ok(alloc_start_cluster);
     }
     
@@ -577,7 +577,7 @@ impl ExfatInodeInner {
         self.free_cluster_range(trunc_start_cluster, free_num,  self.flags, sync_bitmap)?;
         if self.flags != ALLOC_NO_FAT_CHAIN && rest_cluster_num != 0{
             let new_end_cluster = self.get_or_allocate_cluster_on_disk(rest_cluster_num - 1, false)?;
-            fs.set_next_fat(new_end_cluster, FatValue::EndOfChain)?;
+            fs.write_next_fat(new_end_cluster, FatValue::EndOfChain)?;
         }
 
         Ok(())
@@ -649,7 +649,7 @@ impl ExfatInodeInner {
                     while entry >= sb.dentries_per_clu {
                         entry -= sb.dentries_per_clu;
                         if chain.flags == ALLOC_FAT_CHAIN {
-                            chain.dir = fs.get_next_fat(chain.dir)?.into();
+                            chain.dir = fs.read_next_fat(chain.dir)?.into();
                         }
                         else {
                             chain.dir += 1;
@@ -709,7 +709,7 @@ impl ExfatInodeInner {
     fn is_dir_sync(&self) -> bool {
         todo!()
     }
-    
+
     fn write_bytes(&mut self, offset: usize, buf: &[u8]) -> Result<usize> {
         let file_size = self.size_on_disk;
         let block_size = self.fs().super_block().sector_size as usize;
@@ -826,7 +826,7 @@ impl ExfatInodeInner {
             reserved2:[0;7]
         });
 
-        let name = ExfatDentryName::from(name);
+        let name = ExfatName::from(name);
 
         let stream_dentry = ExfatDentry::Stream(ExfatStreamDentry{
             dentry_type: EXFAT_STREAM,

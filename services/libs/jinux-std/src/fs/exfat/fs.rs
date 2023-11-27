@@ -189,6 +189,10 @@ impl ExfatFS{
         self.mutex.lock()
     }
 
+    pub(super) fn cluster_size(&self) -> usize {
+        self.super_block.cluster_size as usize
+    }
+
     pub(super) fn cluster_to_off(&self,cluster:u32) -> usize{
         (((((cluster - EXFAT_RESERVED_CLUSTERS) as u64) << self.super_block.sect_per_cluster_bits) + self.super_block.data_start_sector)*self.super_block.sector_size as u64) as usize
     }

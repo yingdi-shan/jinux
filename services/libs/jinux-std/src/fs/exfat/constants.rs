@@ -57,17 +57,13 @@ pub const EXFAT_MAX_FILE_LEN: u8 = 255;
 pub const VOLUME_DIRTY: u16 = 0x0002;
 pub const MEDIA_FAILURE: u16 = 0x0004;
 
-pub const EXFAT_EOF_CLUSTER: u32 = 0xFFFFFFFF;
-pub const EXFAT_BAD_CLUSTER: u32 = 0xFFFFFFF7;
-pub const EXFAT_FREE_CLUSTER: u32 = 0;
+
 // Cluster 0, 1 are reserved, the first cluster is 2 in the cluster heap.
 pub const EXFAT_RESERVED_CLUSTERS: u32 = 2;
 pub const EXFAT_FIRST_CLUSTER: u32 = 2;
 
 // AllocationPossible and NoFatChain field in GeneralSecondaryFlags Field
-pub const ALLOC_POSSIBLE: u8 = 0x01;
-pub const ALLOC_FAT_CHAIN: u8 = 0x01;
-pub const ALLOC_NO_FAT_CHAIN: u8 = 0x03;
+
 
 pub const DENTRY_SIZE: usize = 32; // directory entry size
 pub const DENTRY_SIZE_BITS: u32 = 5;
@@ -120,8 +116,8 @@ pub const EXFAT_MAX_SECT_SIZE_BITS: u8 = 12;
 // Timestamp pub constants
 pub const EXFAT_MIN_TIMESTAMP_SECS: u64 = 315532800;
 pub const EXFAT_MAX_TIMESTAMP_SECS: u64 = 4354819199;
-pub const FAT_ENT_SIZE:u32 = 4;
-pub const FAT_ENT_SIZE_BITS:u32 = 2;
+
+
 
 pub const EXFAT_TZ_VALID: u8 = 1<<7;
 
