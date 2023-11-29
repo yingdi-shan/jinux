@@ -497,11 +497,11 @@ impl ExfatInodeInner {
         // if no continuous available, turn to fat allocation
         if cur_cluster_num == 0 {
             // search for a continuous chunk big enough
-            let search_result = bitmap.find_next_free_cluster_chunk_opt(EXFAT_FIRST_CLUSTER, num_to_be_allocated);
+            let search_result = bitmap.find_next_free_cluster_range_fast(EXFAT_FIRST_CLUSTER, num_to_be_allocated);
             match search_result {
                 Result::Ok(start_cluster) => {
                     alloc_start_cluster = start_cluster;
-                    bitmap.set_bitmap_used_chunk(start_cluster, num_to_be_allocated, sync_bitmap)?;
+                    bitmap.set_bitmap_range_used(start_cluster, num_to_be_allocated, sync_bitmap)?;
                     self.start_cluster = alloc_start_cluster;
                     self.flags = ALLOC_NO_FAT_CHAIN;
                     return Ok(alloc_start_cluster);
@@ -521,9 +521,9 @@ impl ExfatInodeInner {
             // first, check for if there are enough following clusters.
             // if not, we can give up continuous allocation and turn to fat allocation
             alloc_start_cluster = self.start_cluster + cur_cluster_num as u32;
-            let ok_to_append = bitmap.is_cluster_chunk_free(alloc_start_cluster, num_to_be_allocated)?;
+            let ok_to_append = bitmap.is_cluster_range_free(alloc_start_cluster, num_to_be_allocated)?;
             if ok_to_append {
-                bitmap.set_bitmap_used_chunk(alloc_start_cluster, num_to_be_allocated, sync_bitmap)?;
+                bitmap.set_bitmap_range_used(alloc_start_cluster, num_to_be_allocated, sync_bitmap)?;
                 return Ok(alloc_start_cluster);
             }
             else {
@@ -558,7 +558,7 @@ impl ExfatInodeInner {
         let mut bitmap = bitmap_binding.lock();
 
         if flags == ALLOC_NO_FAT_CHAIN {
-            bitmap.set_bitmap_unused_chunk(start_cluster, free_num, sync_bitmap)?;
+            bitmap.set_bitmap_range_unused(start_cluster, free_num, sync_bitmap)?;
         }
         else {
             self.free_cluster_fat(start_cluster, free_num, sync_bitmap, &mut bitmap)?;

@@ -1,6 +1,6 @@
-use core::{sync::atomic::AtomicUsize};
+use core::ops::Range;
 
-use super::{block_device::BlockDevice, super_block::ExfatSuperBlock, inode::ExfatInode, balloc::ExfatBitmap, upcase_table::ExfatUpcaseTable};
+use super::{block_device::BlockDevice, super_block::ExfatSuperBlock, inode::ExfatInode, bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS}, upcase_table::ExfatUpcaseTable, fat::ClusterID};
 
 use crate::{fs::{exfat::constants::*, utils::SuperBlock,utils::{FileSystem, Inode}}, return_errno, return_errno_with_message,prelude::*};
 use alloc::boxed::Box;
@@ -201,8 +201,8 @@ impl ExfatFS{
         cluster >= EXFAT_RESERVED_CLUSTERS && cluster < self.super_block.num_clusters
     }
 
-    pub(super) fn is_valid_cluster_chunk(&self,start_cluster:u32, cluster_num:u32) -> bool {
-        start_cluster >= EXFAT_RESERVED_CLUSTERS && start_cluster + cluster_num - 1 < self.super_block.num_clusters
+    pub(super) fn is_cluster_range_valid(&self,clusters:Range<ClusterID>) -> bool {
+        clusters.start >= EXFAT_RESERVED_CLUSTERS && clusters.end < self.super_block.num_clusters
     }
 
     pub(super) fn set_volume_dirty(&mut self) {

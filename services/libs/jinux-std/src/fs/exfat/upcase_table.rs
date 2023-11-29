@@ -15,13 +15,12 @@ impl ExfatUpcaseTable {
             fs:Weak::default()
         }
     }
+
     pub fn load_upcase_table(fs:Weak<ExfatFS>) -> Result<Self> {
-        let root_dir = fs.upgrade().unwrap().super_block().root_dir;
-        let exfat_dentry_iterator = ExfatDentryIterator::from(fs.clone(),0,ExfatChain{
-            dir:root_dir,
-            size:0,
-            flags:ALLOC_FAT_CHAIN
-        });
+       let root_cluster = fs.upgrade().unwrap().super_block().root_dir;
+        let chain = ExfatChain::new(fs.clone(),root_cluster,FatChainFlags::ALLOC_POSSIBLE);
+
+        let dentry_iterator = ExfatDentryIterator::new(chain, 0, None);
 
         for dentry_result in exfat_dentry_iterator{
             let dentry = dentry_result?;
@@ -34,12 +33,14 @@ impl ExfatUpcaseTable {
     }
 
     fn allocate_table(fs_weak:Weak<ExfatFS>,dentry:&ExfatUpcaseDentry) -> Result<Self> {
-        let fs = fs_weak.upgrade().unwrap();
+
         if (dentry.size as usize) < UPCASE_MANDATORY_SIZE * UNICODE_SIZE {
             return_errno!(Errno::EINVAL)
         }
-        let mut buf: Vec<u8> = vec![0;dentry.size as usize];
-        fs.block_device().read_at(fs.cluster_to_off(dentry.start_cluster), &mut buf)?;
+
+        let chain = ExfatChain::new(fs.clone(),dentry.start_cluster,FatChainFlags::ALLOC_POSSIBLE);
+        let mut buf = vec![0;dentry.size as usize];
+        chain.read_at(0, &mut buf);
         
         Self::verify_checksum(&buf, dentry.checksum)?;
 
@@ -55,10 +56,7 @@ impl ExfatUpcaseTable {
 
         Ok(res)
 
-        //Ok(ExfatUpcaseTable{
-        //    upcase_table: buf[0..UPCASE_MANDATORY_SIZE],
-        //    fs
-        //})
+     
     }
 
     fn verify_checksum(data: &Vec<u8>, checksum: u32) -> Result<()> {

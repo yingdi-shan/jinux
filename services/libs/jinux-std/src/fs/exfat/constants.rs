@@ -9,13 +9,6 @@ pub const NLS_NAME_OVERLEN: u8 = 2;
 pub const EXFAT_HASH_BITS: u8 = 8;
 pub const EXFAT_HASH_SIZE: u32 = 1 << EXFAT_HASH_BITS;
 
-// Entry set indexes
-pub const ES_2_ENTRIES: u32 = 2;
-pub const ES_ALL_ENTRIES: u32 = 0;
-
-pub const ES_IDX_FILE: usize = 0;
-pub const ES_IDX_STREAM: usize = 1;
-pub const ES_IDX_FIRST_FILENAME: usize = 2;
 
 
 // Other pub constants 
@@ -62,40 +55,14 @@ pub const MEDIA_FAILURE: u16 = 0x0004;
 pub const EXFAT_RESERVED_CLUSTERS: u32 = 2;
 pub const EXFAT_FIRST_CLUSTER: u32 = 2;
 
-// AllocationPossible and NoFatChain field in GeneralSecondaryFlags Field
 
 
-pub const DENTRY_SIZE: usize = 32; // directory entry size
-pub const DENTRY_SIZE_BITS: u32 = 5;
+
 // exFAT allows 8388608(256MB) directory entries
 pub const MAX_EXFAT_DENTRIES: u32 = 8388608;
 
-// dentry types
-pub const EXFAT_UNUSED: u8 = 0x00; // end of directory
-pub const EXFAT_DELETE: u8 = !0x80;
-pub const IS_EXFAT_DELETED: fn(x: u8) -> bool = |x| (x < 0x80); // deleted file (0x01~0x7F)
-pub const EXFAT_INVAL: u8 = 0x80; // invalid value
-pub const EXFAT_BITMAP: u8 = 0x81; // allocation bitmap
-pub const EXFAT_UPCASE: u8 = 0x82; // upcase table
-pub const EXFAT_VOLUME: u8 = 0x83; // volume label
-pub const EXFAT_FILE: u8 = 0x85; // file or dir
-pub const EXFAT_GUID: u8 = 0xA0;
-pub const EXFAT_PADDING: u8 = 0xA1;
-pub const EXFAT_ACLTAB: u8 = 0xA2;
-pub const EXFAT_STREAM: u8 = 0xC0; // stream entry
-pub const EXFAT_NAME: u8 = 0xC1; // file name entry
-pub const EXFAT_ACL: u8 = 0xC2; // acl entry
-pub const EXFAT_VENDOR_EXT: u8 = 0xE0; // vendor extension entry
-pub const EXFAT_VENDOR_ALLOC: u8 = 0xE1; // vendor allocation entry
 
-pub const IS_EXFAT_CRITICAL_PRI: fn(x: u8) -> bool = |x| (x < 0xA0);
-pub const IS_EXFAT_BENIGN_PRI: fn(x: u8) -> bool = |x| (x < 0xC0);
-pub const IS_EXFAT_CRITICAL_SEC: fn(x: u8) -> bool = |x| (x < 0xE0);
 
-// checksum types
-pub const CS_DIR_ENTRY: u8 = 0;
-pub const CS_BOOT_SECTOR: u8 = 1;
-pub const CS_DEFAULT: u8 = 2;
 
 // file attributes
 pub const ATTR_READONLY: u16 = 0x0001;

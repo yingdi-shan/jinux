@@ -3,7 +3,7 @@ use crate::prelude::*;
 use alloc::fmt::Debug;
 /// A simple block device for Exfat.
 pub trait BlockDevice: Send + Sync + Any {
-    ///Returns the number of blocks.
+    ///Returns the number of sectors.
     fn sectors_count(&self) -> usize;
 
     /// Reads a `[u8]` slice at `offset` from the block device.
@@ -11,22 +11,22 @@ pub trait BlockDevice: Send + Sync + Any {
     /// Returns how many bytes were read.
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize>;
 
-    //Reads a block from the block device.
-    fn read_sector(&self, bid: usize, block: &VmFrame) -> Result<()>;
+    //Reads a sector from the block device.
+    fn read_sector(&self, sector_id: usize, sector: &VmFrame) -> Result<()>;
 
     //Reads a page from the block device.
-    fn read_page(&self, bid: usize, block: &VmFrame) -> Result<()>;
+    fn read_page(&self, page_id: usize, page: &VmFrame) -> Result<()>;
 
     /// Writes a `[u8]` slice at `offset` into the block device.
     ///
     /// Returns how many bytes were written.
     fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize>;
 
-    // Writes a block into the block device.
-    fn write_sector(&self, bid: usize, block: &VmFrame) -> Result<()>;
+    // Writes a sector into the block device.
+    fn write_sector(&self, sector_id: usize, sector: &VmFrame) -> Result<()>;
 
     //Writes a page into the block device.
-    fn write_page(&self, bid: usize, block: &VmFrame) -> Result<()>;
+    fn write_page(&self, page_id: usize, page: &VmFrame) -> Result<()>;
 }
 
 pub const SECTOR_SIZE : usize = 512;

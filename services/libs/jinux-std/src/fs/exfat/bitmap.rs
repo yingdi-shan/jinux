@@ -1,31 +1,36 @@
-use crate::prelude::*;
-use bitvec::prelude::*;
-use super::{fs::ExfatFS, dentry::{ExfatDentryIterator, ExfatDentry, ExfatBitmapDentry}, fat::ExfatChain, constants::{ALLOC_FAT_CHAIN, EXFAT_RESERVED_CLUSTERS}};
+use core::ops::Range;
+
+use crate::{prelude::*, fs::exfat::fat::FatChainFlags};
+use bitvec::{prelude::*, access::BitAccess};
+use super::{fs::ExfatFS, dentry::{ExfatDentryIterator, ExfatDentry, ExfatBitmapDentry}, fat::{ExfatChain, ClusterID}, constants::{ALLOC_FAT_CHAIN, EXFAT_RESERVED_CLUSTERS}};
+
+//TODO:use u64
+type BitStore = u8;
+pub const EXFAT_RESERVED_CLUSTERS: u32 = 2;
 
 
 #[derive(Debug,Default)]
 pub struct ExfatBitmap{
     /// start cluster of allocation bitmap
-    map_cluster:u32,
+    chain:ExfatChain,
     // TODO: use jinux_util::bitmap
-    bitvec:BitVec<u8>,
+    bitvec:BitVec<BitStore>,
     fs:Weak<ExfatFS>
 }
 
 impl ExfatBitmap{
     
     pub fn load_bitmap(fs:Weak<ExfatFS>) -> Result<Self> {
-        let root_dir = fs.upgrade().unwrap().super_block().root_dir;
-        let exfat_dentry_iterator = ExfatDentryIterator::from(fs.clone(),0,ExfatChain{
-            dir:root_dir,
-            size:0,
-            flags:ALLOC_FAT_CHAIN
-        });
+        let root_cluster = fs.upgrade().unwrap().super_block().root_dir;
+        let chain = ExfatChain::new(fs.clone(),root_cluster,FatChainFlags::ALLOC_POSSIBLE);
 
-        for dentry_result in exfat_dentry_iterator{
+        let dentry_iterator = ExfatDentryIterator::new(chain, 0, None);
+
+        for dentry_result in dentry_iterator{
             let dentry = dentry_result?;
             if let ExfatDentry::Bitmap(bitmap_dentry) = dentry {
-                if bitmap_dentry.flags == 0 {
+                //If the last bit of bitmap is 0, it is a valid bitmap.
+                if (bitmap_dentry.flags & 0x1) == 0 {
                     return Self::allocate_bitmap(fs,&bitmap_dentry);
                 }
             }
@@ -40,100 +45,92 @@ impl ExfatBitmap{
 
     fn allocate_bitmap(fs:Weak<ExfatFS>,dentry:&ExfatBitmapDentry) -> Result<Self> {
 
+        let chain = ExfatChain::new(fs.clone(),dentry.start_cluster,FatChainFlags::ALLOC_POSSIBLE);
         let mut buf = vec![0;dentry.size as usize];
-        fs.upgrade().unwrap().block_device().read_at(fs.upgrade().unwrap().cluster_to_off(dentry.start_cluster), &mut buf)?;
-        
+        chain.read_at(0, &mut buf);
         Ok(ExfatBitmap{
-            map_cluster:dentry.start_cluster,
+            chain,
             bitvec:BitVec::from_slice(&buf),
             fs
         })
     }
 
     pub fn set_bitmap_used(&mut self,cluster:u32, sync:bool) -> Result<()> {
-        self.set_bitmap_chunk(cluster, 1, true, sync)
+        self.set_bitmap_range(cluster..cluster +1 , true, sync)
     }
 
     pub fn set_bitmap_unused(&mut self,cluster:u32, sync:bool) -> Result<()> {
-        self.set_bitmap_chunk(cluster, 1, false, sync)
+        self.set_bitmap_range(cluster..cluster +1, false, sync)
     }
     
-    pub fn set_bitmap_used_chunk(&mut self, start_cluster:u32, cluster_num:u32, sync:bool) -> Result<()> {
-        self.set_bitmap_chunk(start_cluster, cluster_num, true, sync)
+    pub fn set_bitmap_range_used(&mut self, clusters:Range<ClusterID>, sync:bool) -> Result<()> {
+        self.set_bitmap_range(clusters, true, sync)
     }
 
-    pub fn set_bitmap_unused_chunk(&mut self, start_cluster:u32, cluster_num:u32, sync:bool) -> Result<()> {
-        self.set_bitmap_chunk(start_cluster, cluster_num, false, sync)
+    pub fn set_bitmap_range_unused(&mut self, clusters:Range<ClusterID>, sync:bool) -> Result<()> {
+        self.set_bitmap_range(clusters, false, sync)
     }
 
     pub fn is_cluster_free(&self, cluster:u32) -> Result<bool> {
-        self.is_cluster_chunk_free(cluster, 1)
+        self.is_cluster_range_free(cluster..cluster + 1)
     }
 
-    pub fn is_cluster_chunk_free(&self, start_cluster:u32, cluster_num:u32) -> Result<bool> {
-        if !self.fs().is_valid_cluster_chunk(start_cluster, cluster_num) {
+    pub fn is_cluster_range_free(&self, clusters:Range<ClusterID>) -> Result<bool> {
+        if !self.fs().is_cluster_range_valid(clusters) {
             return_errno!(Errno::EINVAL)
         }
         
-        let start_index = start_cluster - EXFAT_RESERVED_CLUSTERS;
-        let mut is_free = true;
-        for id in start_index..start_index + cluster_num {
-            if self.bitvec[id as usize] {
-                is_free = false;
-                break;
+        for id in clusters {
+            if self.bitvec[(id - EXFAT_RESERVED_CLUSTERS) as usize] {
+                Ok(false)
             }
         }
-        Ok(is_free)
+        Ok(true)
     }
 
     //Return the first free cluster
     pub fn find_next_free_cluster(&self,cluster:u32) -> Result<u32>{
-        self.find_next_free_cluster_chunk(cluster, 1)
+        self.find_next_free_cluster_range(cluster, 1)
     }
 
     //Return the first free cluster chunk, set cluster_num=1 to find a single cluster
-    pub fn find_next_free_cluster_chunk(&self, start_cluster:u32, cluster_num:u32) -> Result<u32> {
-        if !self.fs().is_valid_cluster_chunk(start_cluster, cluster_num) {
+    pub fn find_next_free_cluster_range(&self, search_start_cluster:ClusterID, cluster_num:u32) -> Result<Range<ClusterID>> {
+
+        if !self.fs().is_cluster_range_valid(search_start_cluster.. search_start_cluster+cluster_num) {
             return_errno!(Errno::EINVAL)
         }
 
-        let mut cur_index = start_cluster - EXFAT_RESERVED_CLUSTERS;
+        let mut cur_index = search_start_cluster - EXFAT_RESERVED_CLUSTERS;
         let end_index = self.fs().super_block().num_clusters;
         let search_end_index = end_index - cluster_num + 1;
-        let mut start_index: u32 = 0;
-        let mut found = false;
+        let mut range_start_index: ClusterID = 0;
+        
         while cur_index < search_end_index {
-            if self.bitvec.get(cur_index as usize).is_none() {
-                start_index  = cur_index;
+            if self.bitvec.get(cur_index as usize).unwrap() {
+                range_start_index  = cur_index;
                 let mut cnt = 0;
-                while cnt < cluster_num && cur_index < end_index && self.bitvec.get(cur_index as usize).is_none() {
+                while cnt < cluster_num && cur_index < end_index && self.bitvec.get(cur_index as usize).unwrap() {
                     cnt += 1;
                     cur_index += 1;
                 }
                 if cnt >= cluster_num {
-                    found = true;
-                    break;
+                    Ok(range_start_index + EXFAT_RESERVED_CLUSTERS..range_start_index + EXFAT_RESERVED_CLUSTERS+cluster_num )
                 }
             }
             cur_index += 1;
         }
-
-        if found {
-            Ok(start_index + EXFAT_RESERVED_CLUSTERS)
-        }
-        else {
-            return_errno!(Errno::ENOSPC)
-        }
+        return_errno!(Errno::ENOSPC)
+        
     }
 
-    pub fn find_next_free_cluster_chunk_opt(&self, start_cluster:u32, cluster_num:u32) -> Result<u32> {
-        if !self.fs().is_valid_cluster_chunk(start_cluster, cluster_num) {
+    pub fn find_next_free_cluster_range_fast(&self, search_start_cluster:ClusterID, cluster_num:u32) -> Result<Range<ClusterID>> {
+        if !self.fs().is_cluster_range_valid(search_start_cluster.. search_start_cluster+cluster_num) {
             return_errno!(Errno::EINVAL)
         }
 
-        let bytes:&[u8] = self.bitvec.as_raw_slice();
+        let bytes:&[BitStore] = self.bitvec.as_raw_slice();
         let unit_size: u32 = 8;
-        let start_cluster_index = start_cluster - EXFAT_RESERVED_CLUSTERS;
+        let start_cluster_index = search_start_cluster - EXFAT_RESERVED_CLUSTERS;
         let mut cur_unit_index = start_cluster_index / unit_size;
         let mut cur_unit_offset = start_cluster_index % unit_size;
         let total_cluster_num = self.fs().super_block().num_clusters;
@@ -232,7 +229,7 @@ impl ExfatBitmap{
                 break;
             }
             if found {
-                Ok(result_bit_index + EXFAT_RESERVED_CLUSTERS)
+                Ok(result_bit_index + EXFAT_RESERVED_CLUSTERS..result_bit_index + EXFAT_RESERVED_CLUSTERS+cluster_num )
             }
             else {
                 return_errno!(Errno::ENOSPC)
@@ -240,36 +237,33 @@ impl ExfatBitmap{
         }
         else {
             // cluster_num <= unit_size, back to the simple function
-            self.find_next_free_cluster_chunk(start_cluster, cluster_num)
+            self.find_next_free_cluster_range(search_start_cluster, cluster_num)
         }
     }
 
 
-    fn set_bitmap_chunk(&mut self, start_cluster:u32, cluster_num:u32, bit:bool, sync:bool) -> Result<()> {
+    fn set_bitmap_range(&mut self, clusters:Range<ClusterID>, bit:bool, sync:bool) -> Result<()> {
         if !self.fs().is_valid_cluster_chunk(start_cluster, cluster_num) {
             return_errno!(Errno::EINVAL)
         }
 
-        let start_index = start_cluster - EXFAT_RESERVED_CLUSTERS;
-        for i in 0..cluster_num {
-            self.bitvec.set((start_index + i) as usize, bit);
+        for cluster_id in clusters {
+            self.bitvec.set((cluster_id - EXFAT_RESERVED_CLUSTERS) as usize, bit);
         }
 
-        self.write_bitmap_chunk_to_disk(start_cluster, cluster_num, sync)?;
+        self.write_bitmap_range_to_disk(clusters, sync)?;
         Ok(())
     }
 
 
-    fn write_bitmap_chunk_to_disk(&self, start_index:u32, cluster_num:u32, sync:bool) -> Result<()> {
-        let start_byte_off:usize = start_index as usize / core::mem::size_of::<u8>();
-        let end_byte_off:usize = start_byte_off + cluster_num as usize - 1  / core::mem::size_of::<u8>();
-        let bytes:&[u8] = self.bitvec.as_raw_slice();
-        let byte_chunk = &bytes[start_byte_off..end_byte_off + 1];
+    fn write_bitmap_range_to_disk(&self, clusters:Range<ClusterID>, sync:bool) -> Result<()> {
+        let start_byte_off:usize = (clusters.start as usize - EXFAT_RESERVED_CLUSTERS) / core::mem::size_of::<BitStore>();
+        let end_byte_off:usize = (clusters.end - EXFAT_RESERVED_CLUSTERS) / core::mem::size_of::<BitStore>();
+
+        let bytes:&[BitStore] = self.bitvec.as_raw_slice();
+        let byte_chunk = &bytes[start_byte_off..end_byte_off];
         
-        let byte_off_on_disk = self.fs().cluster_to_off(self.map_cluster) + start_byte_off;
-        
-        //FIXME: We should write into the FAT Cluster chain.
-        self.fs().block_device().write_at(byte_off_on_disk, byte_chunk)?;
+        self.chain.write_at(start_byte_off, byte_chunk)?;
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use core::mem::size_of;
-use jinux_frame::vm::VmIo;
+use jinux_frame::vm::{VmIo, VmFrame};
 
-use super::fs::ExfatFS;
+use super::{fs::ExfatFS, bitmap::EXFAT_RESERVED_CLUSTERS};
 use crate::prelude::*;
 use super::super_block::ExfatSuperBlock;
 
@@ -15,8 +15,8 @@ pub enum FatValue {
     EndOfChain,
 }
 
-const EXFAT_EOF_CLUSTER: u32 = 0xFFFFFFFF;
-const EXFAT_BAD_CLUSTER: u32 = 0xFFFFFFF7;
+const EXFAT_EOF_CLUSTER: ClusterID = 0xFFFFFFFF;
+const EXFAT_BAD_CLUSTER: ClusterID = 0xFFFFFFF7;
 const EXFAT_FREE_CLUSTER: u32 = 0;
 const FAT_ENTRY_SIZE:u32 = size_of::<ClusterID>();
 
@@ -107,6 +107,8 @@ pub struct ExfatChain {
     fs: Weak<ExfatFS>
 }
 
+
+
 //A position by the chain and relative offset in the cluster.
 pub type ExfatChainPosition = (ExfatChain,usize);
 
@@ -116,8 +118,17 @@ impl ExfatChain {
         Self { current, flags, fs }
     }
 
+    pub fn cluster_size(&self) -> usize {
+        self.fs().cluster_size()
+    }
+
     fn fs(&self) -> Arc<ExfatFS>{
         self.fs.upgrade().unwrap()
+    }
+
+    fn physical_cluster_start_offset(&self) -> usize{
+        let cluster_num = (self.current - EXFAT_RESERVED_CLUSTERS) as usize;
+        (cluster_num * self.cluster_size()) + self.fs().super_block().data_start_sector as usize * self.fs().super_block().sector_size as usize
     }
 
     //Walk to the cluster at the given offset, return the new relative offset
@@ -129,19 +140,94 @@ impl ExfatChain {
         Ok(ExfatChainPosition(result_chain,result_offset))
     }
 
+    pub fn is_next_cluster_eof(&self) -> Result<bool> {
+        let fat = self.fs().read_next_fat(self.current)?;
+        Ok(matches!(fat,FatValue::EndOfChain))
+    }
+
+    //The destination cluster must be a valid cluster.
     pub fn walk(&self,steps:u32) -> Result<ExfatChain>{
-        let result_cluster = self.current;
+        let mut result_cluster = self.current;
         if self.flags.contains(FatChainFlags::FAT_CHAIN_NOT_IN_USE) {
             result_cluster = (result_cluster + steps) as ClusterID;
         } else {
             for _ in 0..steps {
                 let fat = self.fs().read_next_fat(result_cluster)?;
                 match fat{
-                    Next(next_fat) => result_cluster = next_fat,
+                    FatValue::Next(next_fat) => result_cluster = next_fat,
                     _ => return_errno_with_message!(Errno::EIO,"invalid access to FAT cluster")
                 }
             }
         }
         Ok(ExfatChain::new(self.fs.clone(),result_cluster,self.flags))
     }
+
+
+    //FIXME: What if cluster size is smaller than page size?
+
+    ///Offset must be inside this cluster
+    pub fn read_page(&self,offset:usize,page:&VmFrame) -> Result<()> {
+        if offset + PAGE_SIZE >= self.cluster_size() {
+            return_errno_with_message!(Errno::EINVAL,"Wrong offset.")
+        }
+
+        let physical_offset = self.physical_cluster_start_offset() + offset;
+        self.fs().block_device().read_page(physical_offset / PAGE_SIZE, &page)
+    }
+
+    ///Offset must be inside this cluster
+    pub fn write_page(&self,offset:usize,page:&VmFrame) -> Result<()> {
+        if offset + PAGE_SIZE >= self.cluster_size() {
+            return_errno_with_message!(Errno::EINVAL,"Wrong offset.")
+        }
+
+        let physical_offset = self.physical_cluster_start_offset() + offset;
+        self.fs().block_device().write_page(physical_offset / PAGE_SIZE, &page)
+    }
+
+    //FIXME: Code repetition for read_at and write_at.
+    pub fn read_at(&self,offset:usize,buf:&mut [u8]) -> Result<usize> {
+        let (chain,off_in_cluster) = self.walk_to_cluster_at_offset(offset)?;
+        let bytes_read = 0usize;
+
+        while bytes_read < buf.len() {
+            let physical_offset = chain.physical_cluster_start_offset() + off_in_cluster;
+            let to_read_size= (buf.len() - bytes_read).min(self.cluster_size() - off_in_cluster);
+
+            let read_size = self.fs().block_device().read_at(physical_offset, &mut buf[bytes_read..bytes_read+to_read_size])?;
+
+            bytes_read += read_size;
+            off_in_cluster += read_size;
+
+            if off_in_cluster == self.cluster_size() {
+                chain = chain.walk(1)?;
+                off_in_cluster = 0;
+            }
+        }
+
+        Ok(())
+        
+    }
+    pub fn write_at(&self,offset:usize,buf:&[u8]) -> Result<usize> {
+        let (chain,off_in_cluster) = self.walk_to_cluster_at_offset(offset)?;
+        let bytes_written = 0usize;
+
+        while bytes_written < buf.len() {
+            let physical_offset = chain.physical_cluster_start_offset() + off_in_cluster;
+            let to_write_size= (buf.len() - bytes_written).min(self.cluster_size() - off_in_cluster);
+
+            let write_size = self.fs().block_device().write_at(physical_offset, &buf[bytes_written..bytes_written+to_write_size])?;
+
+            bytes_written += write_size;
+            off_in_cluster += write_size;
+
+            if off_in_cluster == self.cluster_size() {
+                chain = chain.walk(1)?;
+                off_in_cluster = 0;
+            }
+        }
+
+        Ok(())
+    }
+
 }

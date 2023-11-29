@@ -34,13 +34,14 @@ pub fn make_pos(cluster:u32,entry:u32) -> usize {
     (cluster as usize) << 32usize | (entry as usize & 0xffffffffusize)
 }
 
-pub fn calc_checksum_16(data:&[u8], prev_checksum:u16, type_:u8) -> u16
+///Calculating checksum, ignoring certarin bytes in the range 
+pub fn calc_checksum_16(data:&[u8], ignore:core::ops::Range<usize> ,prev_checksum:u16) -> u16
 {
     let mut result = prev_checksum;
 	for (pos,&value) in data.iter().enumerate() {
         //Ignore the checksum field
-		if type_ == CS_DIR_ENTRY && (pos == 2 || pos == 3) {
-			continue;
+		if ignore.contains(&pos) {
+            continue;
         }
 		result = ((result << 15) | (result >> 1)) + (value as u16);
 	}
