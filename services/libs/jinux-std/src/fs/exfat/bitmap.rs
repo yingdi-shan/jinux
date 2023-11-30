@@ -45,7 +45,7 @@ impl ExfatBitmap {
         self.fs.upgrade().unwrap()
     }
 
-    fn get(&self,bit:usize) -> bool {
+    fn get(&self, bit: usize) -> bool {
         *(self.bitvec.get(bit).unwrap())
     }
 
@@ -95,7 +95,7 @@ impl ExfatBitmap {
 
         for id in clusters {
             if self.bitvec[(id - EXFAT_RESERVED_CLUSTERS) as usize] {
-                return Ok(false)
+                return Ok(false);
             }
         }
         Ok(true)
@@ -129,10 +129,7 @@ impl ExfatBitmap {
             if self.get(cur_index as usize) {
                 range_start_index = cur_index;
                 let mut cnt = 0;
-                while cnt < cluster_num
-                    && cur_index < end_index
-                    && self.get(cur_index as usize)
-                {
+                while cnt < cluster_num && cur_index < end_index && self.get(cur_index as usize) {
                     cnt += 1;
                     cur_index += 1;
                 }
@@ -237,7 +234,7 @@ impl ExfatBitmap {
                     } else {
                         // in this case, the tail unit isn't a complete unit, we should set the invaild part of this unit to 1
                         // the invaild part <=> high (unit_size - rest_cluster_num) bits of tail unit
-                        tail_byte |= 0xFF as u8 - (((1 as u8) << rest_cluster_num) - 1);
+                        tail_byte |= 0xFF_u8 - ((1_u8 << rest_cluster_num) - 1);
                     }
                 }
                 tail_byte |= bytes[(cur_unit_index + mid_unit_num + 1) as usize];

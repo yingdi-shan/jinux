@@ -5,7 +5,7 @@ use super::{
     fs::ExfatFS,
     utils::calc_checksum_32,
 };
-use crate::{prelude::*, fs::exfat::fat::FatChainFlags};
+use crate::{fs::exfat::fat::FatChainFlags, prelude::*};
 
 #[derive(Debug)]
 pub struct ExfatUpcaseTable {
@@ -69,9 +69,9 @@ impl ExfatUpcaseTable {
     }
 
     pub fn transform_to_upcase(&self, buf: &mut [u16]) -> Result<()> {
-        for idx in 0..buf.len() {
-            if (buf[idx] as usize) < UPCASE_MANDATORY_SIZE {
-                buf[idx] = self.upcase_table[buf[idx] as usize];
+        for value in buf {
+            if (*value as usize) < UPCASE_MANDATORY_SIZE {
+                *value = self.upcase_table[*value as usize];
             }
         }
         Ok(())

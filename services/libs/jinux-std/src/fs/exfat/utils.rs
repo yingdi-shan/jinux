@@ -1,17 +1,15 @@
-
 use crate::prelude::*;
-use core::{time::Duration, ops::Range};
+use core::{ops::Range, time::Duration};
 use time::{PrimitiveDateTime, Time};
 
-
 pub fn make_hash_index(cluster: u32, offset: u32) -> usize {
-   (cluster as usize) << 32usize | (offset as usize & 0xffffffffusize)
+    (cluster as usize) << 32usize | (offset as usize & 0xffffffffusize)
 }
 
 pub fn calc_checksum_32(data: &[u8]) -> u32 {
     let mut checksum: u32 = 0;
     for &value in data {
-        checksum = (checksum << 31) | (checksum >> 1) + value as u32;
+        checksum = (checksum << 31) | ((checksum >> 1) + value as u32);
     }
     checksum
 }
@@ -26,11 +24,11 @@ pub fn calc_checksum_16(data: &[u8], ignore: core::ops::Range<usize>, prev_check
         }
         result = ((result << 15) | (result >> 1)) + (value as u16);
     }
-    return result;
+    result
 }
 
-pub fn get_value_from_range(value:u16,range:Range<usize>) -> u16{
-    return (value >> range.start) & (1<<(range.end - range.start ) - 1)
+pub fn get_value_from_range(value: u16, range: Range<usize>) -> u16 {
+    (value >> range.start) & (1 << ((range.end - range.start) - 1))
 }
 
 const DOUBLE_SECOND_RANGE: Range<usize> = 0..5;
@@ -42,7 +40,7 @@ const YEAR_RANGE: Range<usize> = 9..16;
 
 const EXFAT_TIME_ZONE_VALID: u8 = 1 << 7;
 
-#[derive(Default,Debug)]
+#[derive(Default, Debug)]
 pub struct DosTimestamp {
     //Time stamp at the precesion of double seconds.
     pub(super) time: u16,
@@ -64,24 +62,25 @@ impl DosTimestamp {
         Ok(time)
     }
 
-    pub fn from_duration(duration:Duration) -> Result<Self> {
+    pub fn from_duration(duration: Duration) -> Result<Self> {
         todo!()
     }
 
     pub fn to_duration(&self) -> Result<Duration> {
-        let year = 1980 + get_value_from_range(self.date,YEAR_RANGE) as u32;
-        let month_result = time::Month::try_from(get_value_from_range(self.date,MONTH_RANGE) as u8);
+        let year = 1980 + get_value_from_range(self.date, YEAR_RANGE) as u32;
+        let month_result =
+            time::Month::try_from(get_value_from_range(self.date, MONTH_RANGE) as u8);
         if month_result.is_err() {
             return_errno!(Errno::EINVAL)
         }
 
         let month = month_result.unwrap();
 
-        let day = get_value_from_range(self.date,DAY_RANGE);
+        let day = get_value_from_range(self.date, DAY_RANGE);
 
-        let hour = get_value_from_range(self.time,HOUR_RANGE);
-        let minute = get_value_from_range(self.time,HOUR_RANGE);
-        let second = get_value_from_range(self.time,DOUBLE_SECOND_RANGE) * 2;
+        let hour = get_value_from_range(self.time, HOUR_RANGE);
+        let minute = get_value_from_range(self.time, HOUR_RANGE);
+        let second = get_value_from_range(self.time, DOUBLE_SECOND_RANGE) * 2;
 
         let day_result = time::Date::from_calendar_date(year as i32, month, day as u8);
         if day_result.is_err() {
@@ -118,7 +117,7 @@ impl DosTimestamp {
         if time_zone <= 0x3F {
             sec + Self::time_zone_sec(time_zone)
         } else {
-            sec + Self::time_zone_sec(0x80 as u8 - time_zone)
+            sec + Self::time_zone_sec(0x80_u8 - time_zone)
         }
     }
 
@@ -127,5 +126,3 @@ impl DosTimestamp {
         x as u64 * 15 * 60
     }
 }
-
-

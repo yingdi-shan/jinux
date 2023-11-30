@@ -100,7 +100,7 @@ bitflags! {
 }
 
 // Directory pub structures
-#[derive(Debug, Clone,Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExfatChain {
     // current clusterID
     current: ClusterID,
@@ -130,7 +130,7 @@ impl ExfatChain {
         self.flags
     }
 
-    pub(super) fn set_flags(&mut self,flags:FatChainFlags) {
+    pub(super) fn set_flags(&mut self, flags: FatChainFlags) {
         self.flags = flags;
     }
 
@@ -160,7 +160,7 @@ impl ExfatChain {
     }
 
     pub fn is_current_cluster_valid(&self) -> bool {
-       self.fs().is_valid_cluster(self.current)
+        self.fs().is_valid_cluster(self.current)
     }
 
     //The destination cluster must be a valid cluster.
@@ -191,7 +191,7 @@ impl ExfatChain {
         let physical_offset = self.physical_cluster_start_offset() + offset;
         self.fs()
             .block_device()
-            .read_page(physical_offset / PAGE_SIZE, &page)
+            .read_page(physical_offset / PAGE_SIZE, page)
     }
 
     ///Offset must be inside this cluster
@@ -203,7 +203,7 @@ impl ExfatChain {
         let physical_offset = self.physical_cluster_start_offset() + offset;
         self.fs()
             .block_device()
-            .write_page(physical_offset / PAGE_SIZE, &page)
+            .write_page(physical_offset / PAGE_SIZE, page)
     }
 
     //FIXME: Code repetition for read_at and write_at.

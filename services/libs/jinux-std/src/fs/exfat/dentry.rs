@@ -3,17 +3,16 @@ use core::ops::Range;
 use align_ext::AlignExt;
 use jinux_frame::vm::{VmAllocOptions, VmFrame, VmFrameVec, VmIo};
 
-use crate::fs::utils::{InodeType, InodeMode};
+use crate::fs::utils::{InodeMode, InodeType};
 use crate::prelude::*;
 use crate::time::now_as_duration;
 
 use super::constants::{EXFAT_FILE_NAME_LEN, MAX_NAME_LENGTH};
-use super::fat::{ExfatChain, FatChainFlags};
 use super::fat::ExfatChainPosition;
+use super::fat::{ExfatChain, FatChainFlags};
 use super::fs::ExfatFS;
 use super::inode::FatAttr;
 use super::utils::{calc_checksum_16, DosTimestamp};
-
 
 pub const DENTRY_SIZE: usize = 32; // directory entry size
 #[derive(Debug)]
@@ -75,7 +74,6 @@ const EXFAT_ACL: u8 = 0xC2; // not specified in specification, can be used to pr
 const EXFAT_VENDOR_EXT: u8 = 0xE0; // vendor extension entry
 const EXFAT_VENDOR_ALLOC: u8 = 0xE1; // vendor allocation entry
 
-
 impl TryFrom<&[u8]> for ExfatDentry {
     type Error = crate::error::Error;
     fn try_from(value: &[u8]) -> Result<Self> {
@@ -103,9 +101,9 @@ impl TryFrom<&[u8]> for ExfatDentry {
                 ExfatGenericPrimaryDentry::from_bytes(value),
             )),
             //Secondary
-            0x80..=0xFF => Ok(ExfatDentry::GenericSecondary(
+            0xC0..=0xFF => Ok(ExfatDentry::GenericSecondary(
                 ExfatGenericSecondaryDentry::from_bytes(value),
-            ))
+            )),
         }
     }
 }
@@ -199,7 +197,12 @@ impl ExfatDentrySet {
         Ok(dentry_set)
     }
 
-    pub(super) fn from(fs:Arc<ExfatFS>, name: &str,inode_type: InodeType,mode: InodeMode) -> Result<Self> {
+    pub(super) fn from(
+        fs: Arc<ExfatFS>,
+        name: &str,
+        inode_type: InodeType,
+        mode: InodeMode,
+    ) -> Result<Self> {
         let attrs = {
             if inode_type == InodeType::Dir {
                 FatAttr::DIRECTORY.bits()
@@ -328,7 +331,7 @@ impl ExfatDentrySet {
     }
 
     pub(super) fn get_file_dentry(&self) -> ExfatFileDentry {
-        if let ExfatDentry::File(file) = self.dentries[Self::ES_IDX_FILE]{
+        if let ExfatDentry::File(file) = self.dentries[Self::ES_IDX_FILE] {
             file
         } else {
             panic!("Not possible")
@@ -340,7 +343,7 @@ impl ExfatDentrySet {
     }
 
     pub(super) fn get_stream_dentry(&self) -> ExfatStreamDentry {
-        if let ExfatDentry::Stream(stream) = self.dentries[Self::ES_IDX_STREAM]{
+        if let ExfatDentry::Stream(stream) = self.dentries[Self::ES_IDX_STREAM] {
             stream
         } else {
             panic!("Not possible")
@@ -379,7 +382,11 @@ impl ExfatDentrySet {
         const CHECKSUM_BYTES_RANGE: Range<usize> = 2..4;
         const EMPTY_RANGE: Range<usize> = 0..0;
 
-        let mut checksum = calc_checksum_16(self.dentries[Self::ES_IDX_FILE].to_le_bytes(), CHECKSUM_BYTES_RANGE, 0);
+        let mut checksum = calc_checksum_16(
+            self.dentries[Self::ES_IDX_FILE].to_le_bytes(),
+            CHECKSUM_BYTES_RANGE,
+            0,
+        );
 
         for i in 1..self.dentries.len() {
             let dentry = &self.dentries[i];
@@ -393,7 +400,7 @@ impl Checksum for ExfatDentrySet {
     fn verify_checksum(&self) -> bool {
         let checksum = self.calculate_checksum();
         let file = self.get_file_dentry();
-        return file.checksum == checksum;
+        file.checksum == checksum
     }
 
     fn update_checksum(&mut self) {
@@ -459,10 +466,7 @@ impl ExfatDentryIterator {
         let buffer = VmFrameVec::allocate(VmAllocOptions::new(1).uninit(false).can_dma(true))?
             .pop()
             .unwrap();
-        chain.read_page(
-            (offset).align_down(PAGE_SIZE),
-            &buffer,
-        )?;
+        chain.read_page((offset).align_down(PAGE_SIZE), &buffer)?;
 
         Ok(Self {
             chain,
@@ -521,7 +525,7 @@ impl Iterator for ExfatDentryIterator {
         self.buffer.read_bytes(byte_start, &mut dentry_buf).unwrap();
 
         let dentry_result = ExfatDentry::try_from(dentry_buf.as_bytes());
-        
+
         if dentry_result.is_err() {
             self.has_error = true;
             return Some(Err(dentry_result.unwrap_err()));
@@ -719,11 +723,10 @@ impl ExfatName {
         let bytes = self
             .0
             .iter()
-            .map(|character| character.to_le_bytes())
-            .flatten()
+            .flat_map(|character| character.to_le_bytes())
             .collect::<Vec<u8>>();
         const EMPTY_RANGE: Range<usize> = 0..0;
-        return calc_checksum_16(&bytes, EMPTY_RANGE, 0);
+        calc_checksum_16(&bytes, EMPTY_RANGE, 0)
     }
 
     pub fn from_str(name: &str) -> Result<Self> {
@@ -734,7 +737,7 @@ impl ExfatName {
     }
 
     pub fn new() -> Self {
-        ExfatName { 0: Vec::new() }
+        ExfatName(Vec::new())
     }
 
     pub fn to_dentries(&self) -> Vec<ExfatDentry> {
@@ -753,8 +756,12 @@ impl ExfatName {
     }
 
     pub(super) fn verify(&self) -> Result<()> {
-        if self.0.iter().any(|&uni_char|!Self::is_valid_char(uni_char)) {
-            return_errno_with_message!(Errno::EINVAL,"invalid file name.")
+        if self
+            .0
+            .iter()
+            .any(|&uni_char| !Self::is_valid_char(uni_char))
+        {
+            return_errno_with_message!(Errno::EINVAL, "invalid file name.")
         }
         //TODO:verify dots
         Ok(())

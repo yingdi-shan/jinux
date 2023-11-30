@@ -1,6 +1,6 @@
 use super::{
-    constants::{EXFAT_CLUSTERS_UNTRACKED, EXFAT_FIRST_CLUSTER, MEDIA_FAILURE, VOLUME_DIRTY},
     bitmap::EXFAT_RESERVED_CLUSTERS,
+    constants::{EXFAT_CLUSTERS_UNTRACKED, EXFAT_FIRST_CLUSTER, MEDIA_FAILURE, VOLUME_DIRTY},
 };
 use crate::prelude::*;
 use pod::Pod;
@@ -43,7 +43,7 @@ pub struct ExfatSuperBlock {
     pub used_clusters: u32,
 }
 
-const DENTRY_SIZE_BITS: u32= 5;
+const DENTRY_SIZE_BITS: u32 = 5;
 
 impl TryFrom<ExfatBootSector> for ExfatSuperBlock {
     type Error = crate::error::Error;
