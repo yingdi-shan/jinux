@@ -1,6 +1,6 @@
-use jinux_frame::vm::{VmIo, VmFrame};
 use crate::prelude::*;
 use alloc::fmt::Debug;
+use jinux_frame::vm::{VmFrame, VmIo};
 /// A simple block device for Exfat.
 pub trait BlockDevice: Send + Sync + Any {
     ///Returns the number of sectors.
@@ -29,7 +29,7 @@ pub trait BlockDevice: Send + Sync + Any {
     fn write_page(&self, page_id: usize, page: &VmFrame) -> Result<()>;
 }
 
-pub const SECTOR_SIZE : usize = 512;
+pub const SECTOR_SIZE: usize = 512;
 
 impl dyn BlockDevice {
     /// Downcast to the specific type.
@@ -56,7 +56,7 @@ pub fn is_block_aligned(offset: usize) -> bool {
 impl Debug for dyn BlockDevice {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         f.debug_struct("BlockDevice")
-            .field("blocks_count", &self.blocks_count())
+            .field("blocks_count", &self.sectors_count())
             .finish()
     }
 }

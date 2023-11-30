@@ -1,18 +1,18 @@
-use core::ops::Range;
+use core::{ops::Range, sync::atomic::AtomicUsize};
 
-use super::{block_device::BlockDevice, super_block::ExfatSuperBlock, inode::ExfatInode, bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS}, upcase_table::ExfatUpcaseTable, fat::ClusterID};
+use super::{block_device::BlockDevice, super_block::ExfatSuperBlock, inode::ExfatInode, bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS}, upcase_table::ExfatUpcaseTable, fat::{ClusterID, FatChainFlags}};
 
-use crate::{fs::{exfat::constants::*, utils::SuperBlock,utils::{FileSystem, Inode}}, return_errno, return_errno_with_message,prelude::*};
+use crate::{fs::{exfat::{constants::*, inode::Ino}, utils::SuperBlock,utils::{FileSystem, Inode}}, return_errno, return_errno_with_message,prelude::*};
 use alloc::boxed::Box;
 
 use super::super_block::ExfatBootSector;
-use super::utils::le16_to_cpu;
 
 pub(super) use jinux_frame::vm::VmIo;
 use crate::fs::utils::FsFlags;
 use crate::fs::exfat::fat::ExfatChain;
 
 use hashbrown::HashMap;
+
 
 #[derive(Debug)]
 pub struct ExfatFS{
@@ -33,10 +33,12 @@ pub struct ExfatFS{
     //TODO:use concurrent hashmap.
     inodes : RwLock<HashMap<usize,Arc<ExfatInode>>>,
 
-    //We need to hold the mutex before accessing bitmap or inode, otherwise there will be deadlocks.
+    //A global lock, We need to hold the mutex before accessing bitmap or inode, otherwise there will be deadlocks.
     mutex: Mutex<()>
 
 }
+
+pub const EXFAT_ROOT_INO: Ino = 1;
 
 impl ExfatFS{
     pub fn open(block_device:Box<dyn BlockDevice>,mount_option:ExfatMountOptions) -> Result<Arc<Self>> {
@@ -61,7 +63,6 @@ impl ExfatFS{
         Self::verify_boot_region(exfat_fs.block_device())?;
         
         let upcase_table = ExfatUpcaseTable::load_upcase_table(Arc::downgrade(&exfat_fs))?;
-
         let bitmap = ExfatBitmap::load_bitmap(Arc::downgrade(&exfat_fs))?;
         let root = ExfatFS::read_root(exfat_fs.clone())?;
 
@@ -74,7 +75,7 @@ impl ExfatFS{
 
         //TODO: Init NLS Table
        
-        exfat_fs.inodes.write().insert(root.pos(), root.clone());
+        exfat_fs.inodes.write().insert(root.hash_index(), root.clone());
 
         Ok(exfat_fs)
     }
@@ -88,23 +89,23 @@ impl ExfatFS{
     }
 
     pub(super) fn insert_inode(&self,inode:Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {
-        self.inodes.write().insert(inode.pos(), inode)
+        self.inodes.write().insert(inode.hash_index(), inode)
     }
 
     fn read_root(fs:Arc<ExfatFS>) -> Result<Arc<ExfatInode>> {
-        ExfatInode::read_inode(fs.clone(),ExfatChain { dir: fs.super_block.root_dir, size: 0, flags: ALLOC_FAT_CHAIN },0,EXFAT_ROOT_INO)
+
+        ExfatInode::read_from(fs.clone(),(ExfatChain::new(Arc::downgrade(&fs),fs.super_block.root_dir, FatChainFlags::ALLOC_POSSIBLE ),0),EXFAT_ROOT_INO)
     }
 
-
-    //TODO: Check boot signature and boot checksum.
     fn verify_boot_region(block_device:& dyn BlockDevice) -> Result<()> {
-        todo!()
+        //TODO: Check boot signature and boot checksum.
+        Ok(())
     }
 
     fn read_super_block(block_device:& dyn BlockDevice) -> Result<ExfatSuperBlock> {
         let boot_sector = block_device.read_val::<ExfatBootSector>(0)?;
         /* check the validity of BOOT */
-        if le16_to_cpu(boot_sector.signature) != BOOT_SIGNATURE {
+        if boot_sector.signature != BOOT_SIGNATURE {
             return_errno_with_message!(Errno::EINVAL,"invalid boot record signature");
         }
       
@@ -124,17 +125,14 @@ impl ExfatFS{
             return_errno_with_message!(Errno::EINVAL,"bogus number of FAT structure");
         }
 
-        /*
-	    * sect_size_bits could be at least 9 and at most 12.
-	    */
-
-        //FIXEME: Should I allocate memory for error message?
+        
+	    // sect_size_bits could be at least 9 and at most 12.
         if boot_sector.sector_size_bits < EXFAT_MIN_SECT_SIZE_BITS || boot_sector.sector_size_bits > EXFAT_MAX_SECT_SIZE_BITS {
             
             return_errno_with_message!(Errno::EINVAL,"bogus sector size bits");
         }
 
-        if boot_sector.sector_per_cluster_bits > EXFAT_MAX_SECT_SIZE_BITS {
+        if boot_sector.sector_per_cluster_bits + boot_sector.sector_size_bits > 25  {
             return_errno_with_message!(Errno::EINVAL,"bogus sector size bits per cluster");
         }
 
@@ -185,11 +183,15 @@ impl ExfatFS{
         self.root.clone()
     }
 
+    pub fn sector_size(&self) -> usize {
+        self.super_block.sector_size as usize
+    } 
+
     pub(super) fn lock(&self) -> MutexGuard<'_, ()>{
         self.mutex.lock()
     }
 
-    pub(super) fn cluster_size(&self) -> usize {
+    pub fn cluster_size(&self) -> usize {
         self.super_block.cluster_size as usize
     }
 
@@ -232,28 +234,6 @@ impl FileSystem for ExfatFS {
     fn flags(&self) -> FsFlags {
         FsFlags::DENTRY_UNEVICTABLE
     }
-}
-
-    
-// Name pub structures
-pub struct ExfatUniName {
-    name: [u16; MAX_NAME_LENGTH + 3],
-    name_hash: u16,
-    name_len: u8,
-}
-
-
-
-//First empty entry hint information
-pub struct ExfatHintFemp {
-    eidx: i32,
-    count: i32,
-    cur: ExfatChain,
-}
-
-pub struct ExfatHint {
-    clu: u32,
-    eidx_or_off: u32,
 }
 
 #[derive(Clone,Debug)]
