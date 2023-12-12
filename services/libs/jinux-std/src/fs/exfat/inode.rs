@@ -244,16 +244,18 @@ impl ExfatInode {
             let dentry = dentry_result.unwrap()?;
 
             if let ExfatDentry::File(file) = dentry {
-                break;
+                let dentry_set = ExfatDentrySet::read_from_iterator(&file, &mut iter)?;
+                return Self::build_inode_from_dentry_set(
+                    fs,
+                    &dentry_set,
+                    (chain, offset),
+                    entry,
+                    ino,
+                );
             }
             (chain, offset) = iter.chain_and_offset();
             entry += 1;
         }
-
-        let skiped_dentry_position = (chain, offset);
-
-        let dentry_set = ExfatDentrySet::read_from(&skiped_dentry_position)?;
-        Self::build_inode_from_dentry_set(fs, &dentry_set, skiped_dentry_position, entry, ino)
     }
 }
 
@@ -296,6 +298,13 @@ pub struct ExfatInodeInner {
     page_cache: PageCache,
 
     fs: Weak<ExfatFS>,
+}
+
+struct EmptyVistor;
+impl DirentVisitor for EmptyVistor {
+    fn visit(&mut self, name: &str, ino: u64, type_: InodeType, offset: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl ExfatInodeInner {
@@ -798,6 +807,71 @@ impl ExfatInodeInner {
         )
     }
 
+    fn read_multiple_dirs(
+        &self,
+        offset: usize,
+        dir_cnt: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
+        if !self.inode_type.is_directory() {
+            return_errno!(Errno::ENOTDIR)
+        }
+        if dir_cnt == 0 {
+            return Ok(offset);
+        }
+
+        let fs = self.fs();
+        let cluster_size = fs.cluster_size();
+
+        let physical_cluster = self.get_physical_cluster((offset / cluster_size) as u32)?;
+        let cluster_off = (offset % cluster_size) as u32;
+
+        let dentry_position_start = self.start_chain.walk_to_cluster_at_offset(offset)?;
+
+        let mut iter = ExfatDentryIterator::new(
+            dentry_position_start.0.clone(),
+            dentry_position_start.1,
+            None,
+        )?;
+        let mut dir_read = 0;
+        let mut current_off = offset;
+
+        //We need to skip empty or deleted dentery.
+        while dir_read < dir_cnt {
+            let dentry_result = iter.next();
+
+            if dentry_result.is_none() {
+                return_errno_with_message!(Errno::ENOENT, "inode data not available")
+            }
+
+            let dentry = dentry_result.unwrap()?;
+
+            if let ExfatDentry::File(file) = dentry {
+                let dentry_set = ExfatDentrySet::read_from_iterator(&file, &mut iter)?;
+                let attr = FatAttr::from_bits_truncate(file.attribute);
+
+                let inode_type = if attr.contains(FatAttr::DIRECTORY) {
+                    InodeType::Dir
+                } else {
+                    InodeType::File
+                };
+
+                dir_read += 1;
+                visitor.visit(
+                    dentry_set.get_name()?.to_string().as_str(),
+                    0,
+                    inode_type,
+                    current_off,
+                )?;
+                current_off += DENTRY_SIZE * dentry_set.len();
+            } else {
+                current_off += DENTRY_SIZE;
+            }
+        }
+
+        Ok(current_off)
+    }
+
     fn read_single_dir(
         &self,
         offset: usize,
@@ -857,20 +931,33 @@ impl ExfatInodeInner {
     // look up a target with "name", cur inode represent a dir
     // return (target inode, dentries start offset, dentries len)
     // No inode should hold the write lock.
-    fn lookup_by_name(&self, name: &str) -> Result<(Arc<ExfatInode>, usize, usize)> {
+    fn lookup_by_name(&self, target_name: &str) -> Result<(Arc<ExfatInode>, usize, usize)> {
         let sub_dir = self.num_subdir;
-        let mut names: Vec<String> = vec![];
-        let mut offset = 0;
+        let mut name_and_offsets: Vec<(String, usize)> = vec![];
 
-        for i in 0..sub_dir {
-            let (inode, next) = self.read_single_dir(offset, &mut names)?;
+        impl DirentVisitor for Vec<(String, usize)> {
+            fn visit(
+                &mut self,
+                name: &str,
+                ino: u64,
+                type_: InodeType,
+                offset: usize,
+            ) -> Result<()> {
+                self.push((name.into(), offset));
+                Ok(())
+            }
+        }
 
-            if names.last().unwrap().eq(name) {
+        self.read_multiple_dirs(0, sub_dir as usize, &mut name_and_offsets)?;
+
+        for (name, offset) in name_and_offsets {
+            if name.eq(target_name) {
+                let (inode, _) = self.read_single_dir(offset, &mut EmptyVistor {})?;
+
                 let pos = inode.0.read().dentry_entry;
                 let size = inode.0.read().dentry_set_size;
                 return Ok((inode, pos as usize * DENTRY_SIZE, size));
             }
-            offset = next;
         }
         return_errno!(Errno::ENOENT)
     }
@@ -1189,35 +1276,16 @@ impl Inode for ExfatInode {
             return Ok(0);
         }
 
-        struct EmptyVistor;
-        impl DirentVisitor for EmptyVistor {
-            fn visit(
-                &mut self,
-                name: &str,
-                ino: u64,
-                type_: InodeType,
-                offset: usize,
-            ) -> Result<()> {
-                Ok(())
-            }
-        }
         let mut empty_visitor = EmptyVistor;
-
-        let mut offset = 0;
 
         let fs = inner.fs();
         let guard = fs.lock();
 
         //Skip previous directories.
-        for i in 0..dir_cnt {
-            let (_, next_offset) = inner.read_single_dir(offset, &mut empty_visitor)?;
-            offset = next_offset;
-        }
+        let off = inner.read_multiple_dirs(0, dir_cnt, &mut empty_visitor)?;
 
-        for i in dir_cnt as u32..inner.num_subdir {
-            let (_, next_offset) = inner.read_single_dir(offset, visitor)?;
-            offset = next_offset;
-        }
+        inner.read_multiple_dirs(off, inner.num_subdir as usize - dir_cnt, visitor)?;
+
         Ok(inner.num_subdir as usize)
     }
 
