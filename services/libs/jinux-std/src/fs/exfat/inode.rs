@@ -1016,7 +1016,9 @@ impl ExfatInodeInner {
             buf[buf_offset] &= 0x7F;
         }
         self.start_chain.write_at(offset, &buf)?;
+        
         self.num_subdir -= 1;
+        // FIXME: We must make sure that there are no spare tailing clusters in a directory.
         Ok(())
     }
 }
@@ -1390,6 +1392,9 @@ impl Inode for ExfatInode {
 
         // read 'old_name' file or dir and its dentries
         let (old_inode, old_offset, old_len) = self.0.read().lookup_by_name(old_name)?;
+        let old_inode_inner = old_inode.0.read();
+        // flush page cache of old_name
+        old_inode_inner.page_cache.pages().decommit(0..old_inode_inner.size)?;
 
         let mut exist_inode: Arc<ExfatInode> = ExfatInode::default().into();
         let mut exist_offset: usize = 0;
@@ -1401,10 +1406,15 @@ impl Inode for ExfatInode {
                 exist_len = len;
                 // check for a corner case here
                 // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
-                if old_inode.0.read().inode_type.is_directory()
+                if old_inode_inner.inode_type.is_directory()
                     && !exist_inode.0.read().is_empty_dir()?
                 {
                     return_errno!(Errno::ENOTEMPTY)
+                }
+                if old_inode_inner.inode_type.is_reguler_file()
+                    && exist_inode.0.read().inode_type.is_directory()
+                {
+                    return_errno!(Errno::EISDIR)
                 }
                 true
             } else {
@@ -1419,7 +1429,6 @@ impl Inode for ExfatInode {
                 .add_entry(new_name, old_inode.type_(), old_inode.mode())?;
 
         let mut new_inode_inner = new_inode.0.write();
-        let old_inode_inner = old_inode.0.read();
         new_inode_inner.start_chain = ExfatChain::new(
             Arc::downgrade(&fs),
             old_inode_inner.start_chain.cluster_id(),
@@ -1436,7 +1445,7 @@ impl Inode for ExfatInode {
         if need_to_remove_exist {
             fs.evice_inode(exist_inode.hash_index());
             exist_inode.0.write().resize(0)?;
-            exist_inode
+            target_
                 .0
                 .write()
                 .delete_dentry_set(exist_offset, exist_len)?;
