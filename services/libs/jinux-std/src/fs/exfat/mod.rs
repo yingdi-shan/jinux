@@ -152,7 +152,7 @@ mod test {
 
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
-
+      
         assert!(sub_dirs.is_empty());
 
         // Followings are some invalid unlink call. These should return with an error.
