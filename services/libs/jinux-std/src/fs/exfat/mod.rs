@@ -152,6 +152,7 @@ mod test {
 
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
+
         assert!(sub_dirs.is_empty());
 
         // Followings are some invalid unlink call. These should return with an error.
@@ -171,7 +172,7 @@ mod test {
         let _ = root.create(
             folder_name,
             crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
+            InodeMode::all()
         );
         let unlink_fail_result3 = root.unlink(folder_name);
         assert!(
@@ -193,6 +194,7 @@ mod test {
         for (file_id, file_name) in file_names.iter().enumerate() {
             free_clusters_before_create.push(fs.free_clusters());
             let inode = create_file(root.clone(), file_name);
+          
             if fs.free_clusters() > file_id as u32 {
                 let _ = inode.write_at(file_id * cluster_size, &[0, 1, 2, 3, 4]);
             }
@@ -238,7 +240,7 @@ mod test {
         let _ = root.create(
             folder_name,
             crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
+            InodeMode::all()
         );
         let rmdir_result = root.rmdir(folder_name);
         assert!(
@@ -268,7 +270,7 @@ mod test {
         let _ = root.create(
             file_name,
             crate::fs::utils::InodeType::File,
-            InodeMode::all(),
+            InodeMode::all()
         );
         let rmdir_fail_result3 = root.rmdir(file_name);
         assert!(
