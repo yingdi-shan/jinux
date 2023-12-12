@@ -152,7 +152,7 @@ mod test {
 
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
-      
+
         assert!(sub_dirs.is_empty());
 
         // Followings are some invalid unlink call. These should return with an error.
@@ -172,7 +172,7 @@ mod test {
         let _ = root.create(
             folder_name,
             crate::fs::utils::InodeType::Dir,
-            InodeMode::all()
+            InodeMode::all(),
         );
         let unlink_fail_result3 = root.unlink(folder_name);
         assert!(
@@ -194,7 +194,7 @@ mod test {
         for (file_id, file_name) in file_names.iter().enumerate() {
             free_clusters_before_create.push(fs.free_clusters());
             let inode = create_file(root.clone(), file_name);
-          
+
             if fs.free_clusters() > file_id as u32 {
                 let _ = inode.write_at(file_id * cluster_size, &[0, 1, 2, 3, 4]);
             }
@@ -240,7 +240,7 @@ mod test {
         let _ = root.create(
             folder_name,
             crate::fs::utils::InodeType::Dir,
-            InodeMode::all()
+            InodeMode::all(),
         );
         let rmdir_result = root.rmdir(folder_name);
         assert!(
@@ -270,7 +270,7 @@ mod test {
         let _ = root.create(
             file_name,
             crate::fs::utils::InodeType::File,
-            InodeMode::all()
+            InodeMode::all(),
         );
         let rmdir_fail_result3 = root.rmdir(file_name);
         assert!(
@@ -380,9 +380,7 @@ mod test {
         sub_dirs.sort();
 
         assert!(
-            sub_dirs.len() == 2
-                && sub_dirs[0].eq(sub_file_name)
-                && sub_dirs[1].eq(sub_folder_name)
+            sub_dirs.len() == 2 && sub_dirs[0].eq(sub_file_name) && sub_dirs[1].eq(sub_folder_name)
         );
     }
 
@@ -391,11 +389,13 @@ mod test {
         let fs = load_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let old_folder_name = "old_folder";
-        let old_folder = root.create(
-            old_folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
-        ).unwrap();
+        let old_folder = root
+            .create(
+                old_folder_name,
+                crate::fs::utils::InodeType::Dir,
+                InodeMode::all(),
+            )
+            .unwrap();
         let child_file_name = "a.txt";
         let _ = old_folder.create(
             child_file_name,
@@ -415,41 +415,46 @@ mod test {
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(new_folder_name));
-        
+
         let new_folder = root.lookup(new_folder_name).unwrap();
-        
+
         sub_dirs.clear();
         let _ = new_folder.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(child_file_name));
 
         // Test rename directory when the new_name is exist.
         let exist_folder_name = "exist_folder";
-        let exist_folder = root.create(
-            exist_folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
-        ).unwrap();
+        let exist_folder = root
+            .create(
+                exist_folder_name,
+                crate::fs::utils::InodeType::Dir,
+                InodeMode::all(),
+            )
+            .unwrap();
         let _ = exist_folder.create(
             child_file_name,
             crate::fs::utils::InodeType::File,
-            InodeMode::all()
+            InodeMode::all(),
         );
 
         let exist_file_name = "exist_file.txt";
         let _ = root.create(
             exist_file_name,
             crate::fs::utils::InodeType::File,
-            InodeMode::all()
+            InodeMode::all(),
         );
 
-        let rename_dir_to_an_exist_file = root.rename(new_folder_name, &root.clone(), exist_file_name);
+        let rename_dir_to_an_exist_file =
+            root.rename(new_folder_name, &root.clone(), exist_file_name);
         assert!(rename_dir_to_an_exist_file.is_err());
 
-        let rename_dir_to_an_exist_no_empty_folder = root.rename(new_folder_name, &root.clone(), exist_folder_name);
+        let rename_dir_to_an_exist_no_empty_folder =
+            root.rename(new_folder_name, &root.clone(), exist_folder_name);
         assert!(rename_dir_to_an_exist_no_empty_folder.is_err());
 
         let _ = exist_folder.unlink(child_file_name);
-        let rename_dir_to_an_exist_empty_folder = root.rename(new_folder_name, &root.clone(), exist_folder_name);
+        let rename_dir_to_an_exist_empty_folder =
+            root.rename(new_folder_name, &root.clone(), exist_folder_name);
         assert!(rename_dir_to_an_exist_empty_folder.is_ok());
     }
 
