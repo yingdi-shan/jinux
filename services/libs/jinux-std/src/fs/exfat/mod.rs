@@ -152,7 +152,8 @@ mod test {
 
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
-        assert!(sub_dirs.len() == 0);
+      
+        assert!(sub_dirs.is_empty());
 
         // Followings are some invalid unlink call. These should return with an error.
         let unlink_fail_result1 = root.unlink(".");
@@ -182,7 +183,7 @@ mod test {
 
     #[ktest]
     fn test_unlink_multiple() {
-        let file_num: u32 = 30;// This shouldn't be too large, better not allocate new clusters for root dir
+        let file_num: u32 = 30; // This shouldn't be too large, better not allocate new clusters for root dir
         let mut file_names: Vec<String> = (0..file_num).map(|x| x.to_string()).collect();
         file_names.sort();
 
@@ -193,7 +194,8 @@ mod test {
         for (file_id, file_name) in file_names.iter().enumerate() {
             free_clusters_before_create.push(fs.free_clusters());
             let inode = create_file(root.clone(), file_name);
-            if fs.free_clusters() >= file_id as u32 + 1 {
+          
+            if fs.free_clusters() > file_id as u32 {
                 let _ = inode.write_at(file_id * cluster_size, &[0, 1, 2, 3, 4]);
             }
         }
@@ -215,7 +217,8 @@ mod test {
             assert!(
                 read_result.is_ok(),
                 "Fs failed to readdir after unlink {:?}: {:?}",
-                id, read_result.unwrap_err()
+                id,
+                read_result.unwrap_err()
             );
 
             assert!(read_result.unwrap() == id);
@@ -248,7 +251,7 @@ mod test {
 
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
-        assert!(sub_dirs.len() == 0);
+        assert!(sub_dirs.is_empty());
 
         // Followings are some invalid unlink call. These should return with an error.
         let rmdir_fail_result1 = root.rmdir(".");
@@ -277,15 +280,17 @@ mod test {
 
         let parent_name = "parent";
         let child_name = "child.txt";
-        let parent_inode = root.create(
-            parent_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all()
-        ).unwrap();
+        let parent_inode = root
+            .create(
+                parent_name,
+                crate::fs::utils::InodeType::Dir,
+                InodeMode::all(),
+            )
+            .unwrap();
         let _ = parent_inode.create(
             child_name,
             crate::fs::utils::InodeType::File,
-            InodeMode::all()
+            InodeMode::all(),
         );
         let rmdir_fail_result4 = root.rmdir(parent_name);
         assert!(

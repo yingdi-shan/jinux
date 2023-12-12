@@ -262,28 +262,41 @@ impl ExfatDentrySet {
     }
 
     pub(super) fn read_from(pos: &ExfatChainPosition) -> Result<Self> {
-        let primary_dentry = ExfatDentry::read_from(pos)?;
+        let mut iter = ExfatDentryIterator::new(pos.0.clone(), pos.1, None)?;
+        let primary_dentry_result = iter.next();
+
+        if primary_dentry_result.is_none() {
+            return_errno!(Errno::ENOENT)
+        }
+
+        let primary_dentry = primary_dentry_result.unwrap()?;
 
         if let ExfatDentry::File(file_dentry) = primary_dentry {
-            let num_secondary = file_dentry.num_secondary as usize;
-
-            let mut dentries = Vec::<ExfatDentry>::with_capacity(num_secondary + 1);
-            dentries.push(primary_dentry);
-
-            let mut dentry_bytes = vec![0; num_secondary * DENTRY_SIZE];
-
-            pos.0.read_at(pos.1 + DENTRY_SIZE, &mut dentry_bytes)?;
-
-            for i in 0..num_secondary {
-                let dentry =
-                    ExfatDentry::try_from(&dentry_bytes[i * DENTRY_SIZE..(i + 1) * DENTRY_SIZE])?;
-                dentries.push(dentry);
-            }
-
-            Self::new(dentries, true)
+            Self::read_from_iterator(&file_dentry, &mut iter)
         } else {
             return_errno_with_message!(Errno::EIO, "invalid dentry type")
         }
+    }
+
+    pub(super) fn read_from_iterator(
+        file_dentry: &ExfatFileDentry,
+        iter: &mut ExfatDentryIterator,
+    ) -> Result<Self> {
+        let num_secondary = file_dentry.num_secondary as usize;
+
+        let mut dentries = Vec::<ExfatDentry>::with_capacity(num_secondary + 1);
+        dentries.push(ExfatDentry::File(*file_dentry));
+
+        for i in 0..num_secondary {
+            let dentry_result = iter.next();
+            if dentry_result.is_none() {
+                return_errno!(Errno::ENOENT);
+            }
+            let dentry = dentry_result.unwrap()?;
+            dentries.push(dentry);
+        }
+
+        Self::new(dentries, true)
     }
 
     pub(super) fn write_at(&self, pos: &ExfatChainPosition) -> Result<usize> {
@@ -507,8 +520,8 @@ impl Iterator for ExfatDentryIterator {
 
         let dentry_result = ExfatDentry::try_from(dentry_buf.as_bytes());
 
-        if dentry_result.is_err() {
-            return Some(Err(dentry_result.unwrap_err()));
+        if let Err(e) = dentry_result {
+            return Some(Err(e));
         }
 
         self.entry += 1;
