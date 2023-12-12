@@ -295,16 +295,15 @@ impl ExfatBitmap {
             let index = (cluster_id - EXFAT_RESERVED_CLUSTERS) as usize;
             let old_bit = self.used(index);
             self.bitvec.set(index, bit);
-            if old_bit == false && bit == true {
+            if !old_bit && bit {
                 self.free_cluster_num -= 1;
-            }
-            else if old_bit == true && bit == false{
+            } else if old_bit && !bit {
                 self.free_cluster_num += 1;
             }
         }
 
         self.write_bitmap_range_to_disk(clusters.clone(), sync)?;
-        
+
         Ok(())
     }
 

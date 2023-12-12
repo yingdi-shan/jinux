@@ -298,6 +298,13 @@ pub struct ExfatInodeInner {
     fs: Weak<ExfatFS>,
 }
 
+struct EmptyVistor;
+impl DirentVisitor for EmptyVistor {
+    fn visit(&mut self, name: &str, ino: u64, type_: InodeType, offset: usize) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl ExfatInodeInner {
     pub(super) fn default() -> Self {
         Self {
@@ -798,6 +805,68 @@ impl ExfatInodeInner {
         )
     }
 
+    fn read_multiple_dirs(
+        &self,
+        offset: usize,
+        dir_cnt: usize,
+        visitor: &mut dyn DirentVisitor,
+    ) -> Result<usize> {
+        if !self.inode_type.is_directory() {
+            return_errno!(Errno::ENOTDIR)
+        }
+        if dir_cnt == 0 {
+            return Ok(offset);
+        }
+
+        let fs = self.fs();
+        let cluster_size = fs.cluster_size();
+
+        let physical_cluster = self.get_physical_cluster((offset / cluster_size) as u32)?;
+        let cluster_off = (offset % cluster_size) as u32;
+
+        let dentry_position_start = self.start_chain.walk_to_cluster_at_offset(offset)?;
+
+        let mut chain = dentry_position_start.0;
+        let mut chain_offset = dentry_position_start.1;
+        let mut iter = ExfatDentryIterator::new(chain.clone(), chain_offset, None)?;
+        let mut dir_read = 0;
+        let mut current_off = offset;
+
+        //We need to skip empty or deleted dentery.
+        while dir_read < dir_cnt {
+            let dentry_result = iter.next();
+
+            if dentry_result.is_none() {
+                return_errno_with_message!(Errno::ENOENT, "inode data not available")
+            }
+
+            let dentry = dentry_result.unwrap()?;
+
+            if let ExfatDentry::File(file) = dentry {
+                let dentry_set = ExfatDentrySet::read_from(&(chain, chain_offset))?;
+                let attr = FatAttr::from_bits_truncate(file.attribute);
+
+                let inode_type = if attr.contains(FatAttr::DIRECTORY) {
+                    InodeType::Dir
+                } else {
+                    InodeType::File
+                };
+
+                dir_read += 1;
+                visitor.visit(
+                    dentry_set.get_name()?.to_string().as_str(),
+                    0,
+                    inode_type,
+                    current_off,
+                )?;
+            }
+            (chain, chain_offset) = iter.chain_and_offset();
+            current_off += DENTRY_SIZE;
+        }
+
+        Ok(current_off)
+    }
+
     fn read_single_dir(
         &self,
         offset: usize,
@@ -857,20 +926,33 @@ impl ExfatInodeInner {
     // look up a target with "name", cur inode represent a dir
     // return (target inode, dentries start offset, dentries len)
     // No inode should hold the write lock.
-    fn lookup_by_name(&self, name: &str) -> Result<(Arc<ExfatInode>, usize, usize)> {
+    fn lookup_by_name(&self, target_name: &str) -> Result<(Arc<ExfatInode>, usize, usize)> {
         let sub_dir = self.num_subdir;
-        let mut names: Vec<String> = vec![];
-        let mut offset = 0;
+        let mut name_and_offsets: Vec<(String, usize)> = vec![];
 
-        for i in 0..sub_dir {
-            let (inode, next) = self.read_single_dir(offset, &mut names)?;
+        impl DirentVisitor for Vec<(String, usize)> {
+            fn visit(
+                &mut self,
+                name: &str,
+                ino: u64,
+                type_: InodeType,
+                offset: usize,
+            ) -> Result<()> {
+                self.push((name.into(), offset));
+                Ok(())
+            }
+        }
 
-            if names.last().unwrap().eq(name) {
+        self.read_multiple_dirs(0, sub_dir as usize, &mut name_and_offsets)?;
+
+        for (name, offset) in name_and_offsets {
+            if name.eq(target_name) {
+                let (inode, _) = self.read_single_dir(offset, &mut EmptyVistor {})?;
+
                 let pos = inode.0.read().dentry_entry;
                 let size = inode.0.read().dentry_set_size;
                 return Ok((inode, pos as usize * DENTRY_SIZE, size));
             }
-            offset = next;
         }
         return_errno!(Errno::ENOENT)
     }
@@ -929,9 +1011,7 @@ impl ExfatInodeInner {
             buf[buf_offset] &= 0x7F;
         }
         self.start_chain.write_at(offset, &buf)?;
-        
         self.num_subdir -= 1;
-        // FIXME: We must make sure that there are no spare tailing clusters in a directory.
         Ok(())
     }
 }
@@ -1189,35 +1269,16 @@ impl Inode for ExfatInode {
             return Ok(0);
         }
 
-        struct EmptyVistor;
-        impl DirentVisitor for EmptyVistor {
-            fn visit(
-                &mut self,
-                name: &str,
-                ino: u64,
-                type_: InodeType,
-                offset: usize,
-            ) -> Result<()> {
-                Ok(())
-            }
-        }
         let mut empty_visitor = EmptyVistor;
-
-        let mut offset = 0;
 
         let fs = inner.fs();
         let guard = fs.lock();
 
         //Skip previous directories.
-        for i in 0..dir_cnt {
-            let (_, next_offset) = inner.read_single_dir(offset, &mut empty_visitor)?;
-            offset = next_offset;
-        }
+        let off = inner.read_multiple_dirs(0, dir_cnt, &mut empty_visitor)?;
 
-        for i in dir_cnt as u32..inner.num_subdir {
-            let (_, next_offset) = inner.read_single_dir(offset, visitor)?;
-            offset = next_offset;
-        }
+        inner.read_multiple_dirs(off, inner.num_subdir as usize - dir_cnt, visitor)?;
+
         Ok(inner.num_subdir as usize)
     }
 
@@ -1324,7 +1385,6 @@ impl Inode for ExfatInode {
 
         // read 'old_name' file or dir and its dentries
         let (old_inode, old_offset, old_len) = self.0.read().lookup_by_name(old_name)?;
-        let old_inode_inner = old_inode.0.read();
 
         let mut exist_inode: Arc<ExfatInode> = ExfatInode::default().into();
         let mut exist_offset: usize = 0;
@@ -1336,7 +1396,7 @@ impl Inode for ExfatInode {
                 exist_len = len;
                 // check for a corner case here
                 // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
-                if old_inode_inner.inode_type.is_directory()
+                if old_inode.0.read().inode_type.is_directory()
                     && !exist_inode.0.read().is_empty_dir()?
                 {
                     return_errno!(Errno::ENOTEMPTY)
@@ -1354,6 +1414,7 @@ impl Inode for ExfatInode {
                 .add_entry(new_name, old_inode.type_(), old_inode.mode())?;
 
         let mut new_inode_inner = new_inode.0.write();
+        let old_inode_inner = old_inode.0.read();
         new_inode_inner.start_chain = ExfatChain::new(
             Arc::downgrade(&fs),
             old_inode_inner.start_chain.cluster_id(),

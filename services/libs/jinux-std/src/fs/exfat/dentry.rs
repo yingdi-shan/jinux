@@ -507,8 +507,8 @@ impl Iterator for ExfatDentryIterator {
 
         let dentry_result = ExfatDentry::try_from(dentry_buf.as_bytes());
 
-        if dentry_result.is_err() {
-            return Some(Err(dentry_result.unwrap_err()));
+        if let Err(e) = dentry_result {
+            return Some(Err(e));
         }
 
         self.entry += 1;
