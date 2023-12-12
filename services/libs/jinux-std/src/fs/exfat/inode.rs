@@ -244,16 +244,18 @@ impl ExfatInode {
             let dentry = dentry_result.unwrap()?;
 
             if let ExfatDentry::File(file) = dentry {
-                break;
+                let dentry_set = ExfatDentrySet::read_from_iterator(&file, &mut iter)?;
+                return Self::build_inode_from_dentry_set(
+                    fs,
+                    &dentry_set,
+                    (chain, offset),
+                    entry,
+                    ino,
+                );
             }
             (chain, offset) = iter.chain_and_offset();
             entry += 1;
         }
-
-        let skiped_dentry_position = (chain, offset);
-
-        let dentry_set = ExfatDentrySet::read_from(&skiped_dentry_position)?;
-        Self::build_inode_from_dentry_set(fs, &dentry_set, skiped_dentry_position, entry, ino)
     }
 }
 
@@ -826,9 +828,11 @@ impl ExfatInodeInner {
 
         let dentry_position_start = self.start_chain.walk_to_cluster_at_offset(offset)?;
 
-        let mut chain = dentry_position_start.0;
-        let mut chain_offset = dentry_position_start.1;
-        let mut iter = ExfatDentryIterator::new(chain.clone(), chain_offset, None)?;
+        let mut iter = ExfatDentryIterator::new(
+            dentry_position_start.0.clone(),
+            dentry_position_start.1,
+            None,
+        )?;
         let mut dir_read = 0;
         let mut current_off = offset;
 
@@ -843,7 +847,7 @@ impl ExfatInodeInner {
             let dentry = dentry_result.unwrap()?;
 
             if let ExfatDentry::File(file) = dentry {
-                let dentry_set = ExfatDentrySet::read_from(&(chain, chain_offset))?;
+                let dentry_set = ExfatDentrySet::read_from_iterator(&file, &mut iter)?;
                 let attr = FatAttr::from_bits_truncate(file.attribute);
 
                 let inode_type = if attr.contains(FatAttr::DIRECTORY) {
@@ -859,9 +863,10 @@ impl ExfatInodeInner {
                     inode_type,
                     current_off,
                 )?;
+                current_off += DENTRY_SIZE * dentry_set.len();
+            } else {
+                current_off += DENTRY_SIZE;
             }
-            (chain, chain_offset) = iter.chain_and_offset();
-            current_off += DENTRY_SIZE;
         }
 
         Ok(current_off)
