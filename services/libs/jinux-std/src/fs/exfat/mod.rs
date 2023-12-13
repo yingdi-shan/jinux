@@ -337,10 +337,7 @@ mod test {
         // however, after we remove child file, parent directory is removable.
         let _ = parent_inode.unlink(child_name);
         let rmdir_empty_dir = root.rmdir(parent_name);
-        assert!(
-            rmdir_empty_dir.is_ok(),
-            "Fail to remove an empty directory"
-        );
+        assert!(rmdir_empty_dir.is_ok(), "Fail to remove an empty directory");
 
         // test remove a long name directory
         let long_dir_name = "x".repeat(MAX_NAME_LENGTH);
@@ -409,10 +406,7 @@ mod test {
 
         // test rename file when the new_name is exist
         let rename_file_to_itself = root.rename(new_name, &root.clone(), new_name);
-        assert!(
-            rename_file_to_itself.is_ok(),
-            "Fail to rename to itself"
-        );
+        assert!(rename_file_to_itself.is_ok(), "Fail to rename to itself");
 
         let rename_file_to_an_exist_folder = root.rename(new_name, &root.clone(), sub_folder_name);
         assert!(
@@ -431,9 +425,7 @@ mod test {
         sub_dirs.sort();
 
         assert!(
-            sub_dirs.len() == 2
-                && sub_dirs[0].eq(sub_file_name)
-                && sub_dirs[1].eq(sub_folder_name)
+            sub_dirs.len() == 2 && sub_dirs[0].eq(sub_file_name) && sub_dirs[1].eq(sub_folder_name)
         );
 
         // test rename with long file names
@@ -886,7 +878,10 @@ mod test {
             for (file_id, inode) in file_inodes.iter().enumerate() {
                 inode.resize((cur_clusters_per_file + step) as usize * cluster_size);
                 assert!(
-                    fs.free_clusters() == initial_free_clusters - cur_clusters_per_file * file_num - (file_id as u32 + 1) * step,
+                    fs.free_clusters()
+                        == initial_free_clusters
+                            - cur_clusters_per_file * file_num
+                            - (file_id as u32 + 1) * step,
                     "Fail to resize file {:?} from {:?} to {:?}",
                     file_id,
                     cur_clusters_per_file,
