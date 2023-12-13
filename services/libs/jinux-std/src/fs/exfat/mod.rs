@@ -46,6 +46,7 @@ mod test {
         fs::{
             exfat::bitmap::EXFAT_RESERVED_CLUSTERS,
             exfat::block_device::SECTOR_SIZE,
+            exfat::constants::MAX_NAME_LENGTH,
             utils::{Inode, InodeMode},
         },
         prelude::*,
@@ -68,9 +69,76 @@ mod test {
         create_result.unwrap()
     }
 
+    fn create_folder(parent: Arc<dyn Inode>, foldername: &str) -> Arc<dyn Inode> {
+        let create_result = parent.create(
+            foldername,
+            crate::fs::utils::InodeType::Dir,
+            InodeMode::all(),
+        );
+
+        assert!(
+            create_result.is_ok(),
+            "Fs failed to create: {:?}",
+            create_result.unwrap_err()
+        );
+
+        create_result.unwrap()
+    }
+
     #[ktest]
     fn test_new_exfat() {
         load_exfat();
+    }
+
+    #[ktest]
+    fn test_create() {
+        let fs = load_exfat();
+        let root = fs.root_inode() as Arc<dyn Inode>;
+
+        // test basic create
+        let file_name = "a.txt";
+        create_file(root.clone(), file_name);
+        let dir_name = "b";
+        create_folder(root.clone(), dir_name);
+
+        // test create with an exist name
+        let create_file_with_an_exist_name = root.create(
+            dir_name,
+            crate::fs::utils::InodeType::File,
+            InodeMode::all(),
+        );
+        let create_dir_with_an_exist_name = root.create(
+            file_name,
+            crate::fs::utils::InodeType::Dir,
+            InodeMode::all(),
+        );
+        assert!(
+            create_dir_with_an_exist_name.is_err() && create_file_with_an_exist_name.is_err(),
+            "Fs deal with create an exist name incorrectly"
+        );
+
+        // test create with a long name
+        let long_file_name = "x".repeat(MAX_NAME_LENGTH);
+        let create_long_name_file = root.create(
+            &long_file_name,
+            crate::fs::utils::InodeType::File,
+            InodeMode::all(),
+        );
+        assert!(
+            create_long_name_file.is_ok(),
+            "Fail to create a long name file"
+        );
+
+        let long_dir_name = "y".repeat(MAX_NAME_LENGTH);
+        let create_long_name_dir = root.create(
+            &long_dir_name,
+            crate::fs::utils::InodeType::Dir,
+            InodeMode::all(),
+        );
+        assert!(
+            create_long_name_dir.is_ok(),
+            "Fail to create a long name directory"
+        );
     }
 
     #[ktest]
@@ -113,29 +181,6 @@ mod test {
     }
 
     #[ktest]
-    fn test_mkdir() {
-        let fs = load_exfat();
-        let root = fs.root_inode() as Arc<dyn Inode>;
-        let folder_name = "sub";
-        let create_result = root.create(
-            folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
-        );
-
-        assert!(
-            create_result.is_ok(),
-            "Fs failed to create: {:?}",
-            create_result.unwrap_err()
-        );
-
-        let mut sub_dirs: Vec<String> = Vec::new();
-        let _ = root.readdir_at(0, &mut sub_dirs);
-        assert!(sub_dirs.len() == 1);
-        assert!(sub_dirs[0] == folder_name);
-    }
-
-    #[ktest]
     fn test_unlink_single() {
         let fs = load_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
@@ -155,7 +200,7 @@ mod test {
       
         assert!(sub_dirs.is_empty());
 
-        // Followings are some invalid unlink call. These should return with an error.
+        // followings are some invalid unlink call. These should return with an error.
         let unlink_fail_result1 = root.unlink(".");
         assert!(
             unlink_fail_result1.is_err(),
@@ -169,15 +214,20 @@ mod test {
         );
 
         let folder_name = "sub";
-        let _ = root.create(
-            folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all()
-        );
-        let unlink_fail_result3 = root.unlink(folder_name);
+        create_folder(root.clone(), folder_name);
+        let unlink_dir = root.unlink(folder_name);
         assert!(
-            unlink_fail_result3.is_err(),
+            unlink_dir.is_err(),
             "Fs deal with unlink a folder incorrectly"
+        );
+
+        // test unlink a long name file
+        let long_file_name = "x".repeat(MAX_NAME_LENGTH);
+        create_file(root.clone(), &long_file_name);
+        let unlink_long_name_file = root.unlink(&long_file_name);
+        assert!(
+            unlink_long_name_file.is_ok(),
+            "Fail to unlink a long name file"
         );
     }
 
@@ -194,7 +244,7 @@ mod test {
         for (file_id, file_name) in file_names.iter().enumerate() {
             free_clusters_before_create.push(fs.free_clusters());
             let inode = create_file(root.clone(), file_name);
-          
+
             if fs.free_clusters() > file_id as u32 {
                 let _ = inode.write_at(file_id * cluster_size, &[0, 1, 2, 3, 4]);
             }
@@ -216,7 +266,7 @@ mod test {
             let read_result = root.readdir_at(0, &mut sub_inodes);
             assert!(
                 read_result.is_ok(),
-                "Fs failed to readdir after unlink {:?}: {:?}",
+                "Fail to readdir after unlink {:?}: {:?}",
                 id,
                 read_result.unwrap_err()
             );
@@ -237,15 +287,11 @@ mod test {
         let fs = load_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let folder_name = "sub";
-        let _ = root.create(
-            folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all()
-        );
+        create_folder(root.clone(), folder_name);
         let rmdir_result = root.rmdir(folder_name);
         assert!(
             rmdir_result.is_ok(),
-            "Fs failed to rmdir: {:?}",
+            "Fail to rmdir: {:?}",
             rmdir_result.unwrap_err()
         );
 
@@ -267,42 +313,37 @@ mod test {
         );
 
         let file_name = "a.txt";
-        let _ = root.create(
-            file_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all()
-        );
-        let rmdir_fail_result3 = root.rmdir(file_name);
+        create_file(root.clone(), file_name);
+        let rmdir_to_a_file = root.rmdir(file_name);
         assert!(
-            rmdir_fail_result3.is_err(),
+            rmdir_to_a_file.is_err(),
             "Fs deal with rmdir to a file incorrectly"
         );
 
         let parent_name = "parent";
         let child_name = "child.txt";
-        let parent_inode = root
-            .create(
-                parent_name,
-                crate::fs::utils::InodeType::Dir,
-                InodeMode::all(),
-            )
-            .unwrap();
-        let _ = parent_inode.create(
-            child_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all(),
-        );
-        let rmdir_fail_result4 = root.rmdir(parent_name);
+        let parent_inode = create_folder(root.clone(), parent_name);
+        create_file(parent_inode.clone(), child_name);
+        let rmdir_no_empty_dir = root.rmdir(parent_name);
         assert!(
-            rmdir_fail_result4.is_err(),
+            rmdir_no_empty_dir.is_err(),
             "Fs deal with rmdir to a no empty directory incorrectly"
         );
-        // However, after we remove child file, parent directory is removable.
+        // however, after we remove child file, parent directory is removable.
         let _ = parent_inode.unlink(child_name);
-        let rmdir_result1 = root.rmdir(parent_name);
+        let rmdir_empty_dir = root.rmdir(parent_name);
         assert!(
-            rmdir_result1.is_ok(),
-            "Fs failed to remove an empty directory"
+            rmdir_empty_dir.is_ok(),
+            "Fail to remove an empty directory"
+        );
+
+        // test remove a long name directory
+        let long_dir_name = "x".repeat(MAX_NAME_LENGTH);
+        create_folder(root.clone(), &long_dir_name);
+        let rmdir_long_name_dir = root.rmdir(&long_dir_name);
+        assert!(
+            rmdir_long_name_dir.is_ok(),
+            "Fail to remove a long name directory"
         );
     }
 
@@ -338,17 +379,10 @@ mod test {
         let _ = root.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(new_name));
 
+        // test rename between different directories
         let sub_folder_name = "test";
-        let sub_folder = root
-            .create(
-                sub_folder_name,
-                crate::fs::utils::InodeType::Dir,
-                InodeMode::all(),
-            )
-            .unwrap();
-
+        let sub_folder = create_folder(root.clone(), sub_folder_name);
         let sub_file_name = "a.txt";
-
         create_file(sub_folder.clone(), sub_file_name);
         let rename_result = sub_folder.rename(sub_file_name, &root.clone(), sub_file_name);
         assert!(
@@ -369,11 +403,23 @@ mod test {
         );
 
         // test rename file when the new_name is exist
+        let rename_file_to_itself = root.rename(new_name, &root.clone(), new_name);
+        assert!(
+            rename_file_to_itself.is_ok(),
+            "Fail to rename to itself"
+        );
+
         let rename_file_to_an_exist_folder = root.rename(new_name, &root.clone(), sub_folder_name);
-        assert!(rename_file_to_an_exist_folder.is_err());
+        assert!(
+            rename_file_to_an_exist_folder.is_err(),
+            "Fs deal with rename a file to an exist directory incorrectly"
+        );
 
         let rename_file_to_an_exist_file = root.rename(new_name, &root.clone(), sub_file_name);
-        assert!(rename_file_to_an_exist_file.is_ok());
+        assert!(
+            rename_file_to_an_exist_file.is_ok(),
+            "Fail to rename a file to another exist file",
+        );
 
         sub_dirs.clear();
         let _ = root.readdir_at(0, &mut sub_dirs);
@@ -384,6 +430,16 @@ mod test {
                 && sub_dirs[0].eq(sub_file_name)
                 && sub_dirs[1].eq(sub_folder_name)
         );
+
+        // test rename with long file names
+        let long_name_a = "a".repeat(MAX_NAME_LENGTH);
+        let long_name_b = "b".repeat(MAX_NAME_LENGTH);
+        create_file(root.clone(), &long_name_a);
+        let rename_long_name_file = root.rename(&long_name_a, &root.clone(), &long_name_b);
+        assert!(
+            rename_long_name_file.is_ok(),
+            "Fail to rename a long name file"
+        );
     }
 
     #[ktest]
@@ -391,17 +447,9 @@ mod test {
         let fs = load_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let old_folder_name = "old_folder";
-        let old_folder = root.create(
-            old_folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
-        ).unwrap();
+        let old_folder = create_folder(root.clone(), old_folder_name);
         let child_file_name = "a.txt";
-        let _ = old_folder.create(
-            child_file_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all(),
-        );
+        create_file(old_folder.clone(), child_file_name);
 
         // Test rename a folder, the sub-directories should remain.
         let new_folder_name = "new_folder";
@@ -424,23 +472,11 @@ mod test {
 
         // Test rename directory when the new_name is exist.
         let exist_folder_name = "exist_folder";
-        let exist_folder = root.create(
-            exist_folder_name,
-            crate::fs::utils::InodeType::Dir,
-            InodeMode::all(),
-        ).unwrap();
-        let _ = exist_folder.create(
-            child_file_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all()
-        );
+        let exist_folder = create_folder(root.clone(), exist_folder_name);
+        create_file(exist_folder.clone(), child_file_name);
 
         let exist_file_name = "exist_file.txt";
-        let _ = root.create(
-            exist_file_name,
-            crate::fs::utils::InodeType::File,
-            InodeMode::all()
-        );
+        create_file(root.clone(), exist_file_name);
 
         let rename_dir_to_an_exist_file = root.rename(new_folder_name, &root.clone(), exist_file_name);
         assert!(rename_dir_to_an_exist_file.is_err());
@@ -818,5 +854,39 @@ mod test {
             fs.free_clusters() == initial_free_clusters,
             "Fail to free a large chunk"
         );
+    }
+
+    #[ktest]
+    fn test_resize_multiple() {
+        let fs = load_exfat();
+        let cluster_size = fs.cluster_size();
+        let root = fs.root_inode();
+        let file_num: u32 = 45;
+        let mut file_names: Vec<String> = (0..file_num).map(|x| x.to_string()).collect();
+        file_names.sort();
+        let mut file_inodes: Vec<Arc<dyn Inode>> = Vec::new();
+        for (file_id, file_name) in file_names.iter().enumerate() {
+            let inode = create_file(root.clone(), file_name);
+            file_inodes.push(inode);
+        }
+
+        let initial_free_clusters = fs.free_clusters();
+        let max_clusters = 10000.min(initial_free_clusters);
+        let mut step = 1;
+        let mut cur_clusters_per_file = 0;
+        while file_num * (cur_clusters_per_file + step) <= max_clusters {
+            for (file_id, inode) in file_inodes.iter().enumerate() {
+                inode.resize((cur_clusters_per_file + step) as usize * cluster_size);
+                assert!(
+                    fs.free_clusters() == initial_free_clusters - cur_clusters_per_file * file_num - (file_id as u32 + 1) * step,
+                    "Fail to resize file {:?} from {:?} to {:?}",
+                    file_id,
+                    cur_clusters_per_file,
+                    cur_clusters_per_file + step
+                );
+            }
+            cur_clusters_per_file += step;
+            step += 1;
+        }
     }
 }

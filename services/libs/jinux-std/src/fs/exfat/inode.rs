@@ -1390,6 +1390,11 @@ impl Inode for ExfatInode {
             return_errno!(Errno::ENOTDIR)
         }
 
+        // rename something to itself, return success directly
+        if self.0.read().ino == target_.0.read().ino && old_name.eq(new_name) {
+            return Ok(());
+        }
+
         // read 'old_name' file or dir and its dentries
         let (old_inode, old_offset, old_len) = self.0.read().lookup_by_name(old_name)?;
         let old_inode_inner = old_inode.0.read();
