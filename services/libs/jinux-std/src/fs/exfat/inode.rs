@@ -11,7 +11,7 @@ use super::constants::*;
 use super::dentry::{
     Checksum, ExfatDentry, ExfatDentrySet, ExfatFileDentry, ExfatName, DENTRY_SIZE,
 };
-use super::fat::{ClusterID, ExfatChainPosition, FatChainFlags, FatTrait, FatValue};
+use super::fat::{ClusterID, ExfatChainPosition, FatChainFlags, FatValue};
 use super::fs::{ExfatMountOptions, EXFAT_ROOT_INO};
 use super::utils::{make_hash_index, DosTimestamp};
 use crate::events::IoEvents;
