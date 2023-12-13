@@ -99,7 +99,12 @@ mod test {
             sub_inodes.sort();
 
             for i in 0..sub_inodes.len() {
-                assert!(sub_inodes[i].cmp(&file_names[i]).is_eq())
+                assert!(
+                    sub_inodes[i].cmp(&file_names[i]).is_eq(),
+                    "Readdir Result:{:?} Filenames:{:?}",
+                    sub_inodes[i],
+                    file_names[i]
+                )
             }
 
             info!("Successfully creating and reading {} files", file_id + 1);
