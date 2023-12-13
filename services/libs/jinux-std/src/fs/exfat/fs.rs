@@ -94,12 +94,12 @@ impl ExfatFS {
             .fetch_add(1, core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub(super) fn find_opened_inode(&self, pos: usize) -> Option<Arc<ExfatInode>> {
-        self.inodes.read().get(&pos).cloned()
+    pub(super) fn find_opened_inode(&self, hash: usize) -> Option<Arc<ExfatInode>> {
+        self.inodes.read().get(&hash).cloned()
     }
 
-    pub(super) fn evice_inode(&self, pos: usize) {
-        let _ = self.inodes.write().remove(&pos);
+    pub(super) fn evict_inode(&self, hash: usize) {
+        let _ = self.inodes.write().remove(&hash);
     }
 
     pub(super) fn insert_inode(&self, inode: Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {

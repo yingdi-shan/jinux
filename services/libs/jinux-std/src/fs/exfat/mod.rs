@@ -167,7 +167,12 @@ mod test {
             sub_inodes.sort();
 
             for i in 0..sub_inodes.len() {
-                assert!(sub_inodes[i].cmp(&file_names[i]).is_eq())
+                assert!(
+                    sub_inodes[i].cmp(&file_names[i]).is_eq(),
+                    "Readdir Result:{:?} Filenames:{:?}",
+                    sub_inodes[i],
+                    file_names[i]
+                )
             }
 
             info!("Successfully creating and reading {} files", file_id + 1);
@@ -197,7 +202,7 @@ mod test {
 
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
-      
+
         assert!(sub_dirs.is_empty());
 
         // followings are some invalid unlink call. These should return with an error.
@@ -463,9 +468,9 @@ mod test {
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(new_folder_name));
-        
+
         let new_folder = root.lookup(new_folder_name).unwrap();
-        
+
         sub_dirs.clear();
         let _ = new_folder.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(child_file_name));
@@ -478,14 +483,17 @@ mod test {
         let exist_file_name = "exist_file.txt";
         create_file(root.clone(), exist_file_name);
 
-        let rename_dir_to_an_exist_file = root.rename(new_folder_name, &root.clone(), exist_file_name);
+        let rename_dir_to_an_exist_file =
+            root.rename(new_folder_name, &root.clone(), exist_file_name);
         assert!(rename_dir_to_an_exist_file.is_err());
 
-        let rename_dir_to_an_exist_no_empty_folder = root.rename(new_folder_name, &root.clone(), exist_folder_name);
+        let rename_dir_to_an_exist_no_empty_folder =
+            root.rename(new_folder_name, &root.clone(), exist_folder_name);
         assert!(rename_dir_to_an_exist_no_empty_folder.is_err());
 
         let _ = exist_folder.unlink(child_file_name);
-        let rename_dir_to_an_exist_empty_folder = root.rename(new_folder_name, &root.clone(), exist_folder_name);
+        let rename_dir_to_an_exist_empty_folder =
+            root.rename(new_folder_name, &root.clone(), exist_folder_name);
         assert!(rename_dir_to_an_exist_empty_folder.is_ok());
     }
 
