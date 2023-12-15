@@ -1364,12 +1364,6 @@ impl Inode for ExfatInode {
 
         // read 'old_name' file or dir and its dentries
         let (old_inode, old_offset, old_len) = self.0.read().lookup_by_name(old_name)?;
-        let old_inode_inner = old_inode.0.read();
-        // flush page cache of old_name
-        old_inode_inner
-            .page_cache
-            .pages()
-            .decommit(0..old_inode_inner.size)?;
 
         let mut exist_inode: Arc<ExfatInode> = ExfatInode::default().into();
         let mut exist_offset: usize = 0;
@@ -1382,10 +1376,10 @@ impl Inode for ExfatInode {
             exist_len = len;
             // check for a corner case here
             // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
-            if old_inode_inner.inode_type.is_directory() && !exist_inode.0.read().is_empty_dir()? {
+            if old_inode.0.write().inode_type.is_directory() && !exist_inode.0.read().is_empty_dir()? {
                 return_errno!(Errno::ENOTEMPTY)
             }
-            if old_inode_inner.inode_type.is_reguler_file()
+            if old_inode.0.write().inode_type.is_reguler_file()
                 && exist_inode.0.read().inode_type.is_directory()
             {
                 return_errno!(Errno::EISDIR)
@@ -1402,20 +1396,24 @@ impl Inode for ExfatInode {
                 .write()
                 .add_entry(new_name, old_inode.type_(), old_inode.mode())?;
 
-        let mut new_inode_inner = new_inode.0.write();
-        new_inode_inner.start_chain = ExfatChain::new(
-            Arc::downgrade(&fs),
-            old_inode_inner.start_chain.cluster_id(),
-            old_inode_inner.start_chain.flags(),
-        );
-        new_inode_inner.size = old_inode_inner.size;
-        new_inode_inner.size_allocated = old_inode_inner.size_allocated;
-        new_inode_inner.write_inode(true)?;
+        // evict old_inode
+        fs.evict_inode(old_inode.0.write().hash_index());
+        // update metadata
+        let new_inode_inner = new_inode.0.read();
+        old_inode.0.write().dentry_set_position = new_inode_inner.dentry_set_position.clone();
+        old_inode.0.write().dentry_set_size = new_inode_inner.dentry_set_size;
+        old_inode.0.write().dentry_entry = new_inode_inner.dentry_entry;
+        old_inode.0.write().atime = new_inode_inner.atime;
+        old_inode.0.write().ctime = new_inode_inner.ctime;
+        old_inode.0.write().mtime = new_inode_inner.mtime;
+        old_inode.0.write().name = ExfatName::from_str(&new_inode_inner.name.to_string())?;
+        // insert back
+        let _ = fs.insert_inode(old_inode);
 
         // delete 'old_name' dentries
         self.0.write().delete_dentry_set(old_offset, old_len)?;
 
-        // remove the exist 'new_name' file(include file contents and dentries)
+        // remove the exist 'new_name' file(include file contents, inode and dentries)
         if need_to_remove_exist {
             fs.evict_inode(exist_inode.hash_index());
             exist_inode.0.write().resize(0)?;

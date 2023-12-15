@@ -356,7 +356,7 @@ mod test {
         let file_name = "hi.txt";
         let a_inode = create_file(root.clone(), file_name);
 
-        const BUF_SIZE: usize = PAGE_SIZE * 11 + 2023;
+        const BUF_SIZE: usize = 7 * PAGE_SIZE + 11;
         let mut buf = vec![0u8; BUF_SIZE];
         for (i, num) in buf.iter_mut().enumerate() {
             //Use a prime number to make each sector different.
@@ -368,18 +368,39 @@ mod test {
         let rename_result = root.rename(file_name, &root.clone(), new_name);
         assert!(
             rename_result.is_ok(),
-            "Fs failed to rename: {:?}",
+            "Failed to rename: {:?}",
             rename_result.unwrap_err()
         );
 
-        let a_inode_new = root.lookup(new_name).unwrap();
-        let mut read = vec![0u8; BUF_SIZE];
-        let _ = a_inode_new.read_at(0, &mut read);
-        assert!(buf.eq(&read), "File mismatch after rename");
-
+        // test list after rename
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(new_name));
+
+        // test read after rename
+        let a_inode_new = root.lookup(new_name).unwrap();
+        let mut read = vec![0u8; BUF_SIZE];
+        let read_after_rename = a_inode_new.read_at(0, &mut read);
+        assert!(
+            read_after_rename.is_ok() && read_after_rename.clone().unwrap() == BUF_SIZE,
+            "Fail to read after rename: {:?}",
+            read_after_rename.unwrap_err()
+        );
+        assert!(buf.eq(&read), "File mismatch after rename");
+
+        // test write after rename
+        const NEW_BUF_SIZE: usize = 9 * PAGE_SIZE + 23;
+        let new_buf = vec![7u8; NEW_BUF_SIZE];
+        let new_write_after_rename = a_inode_new.write_at(0, &new_buf);
+        assert!(
+            new_write_after_rename.is_ok() && new_write_after_rename.clone().unwrap() == NEW_BUF_SIZE,
+            "Fail to write file after rename: {:?}",
+            new_write_after_rename.unwrap_err()
+        );
+
+        let mut new_read = vec![0u8; NEW_BUF_SIZE];
+        let _ = a_inode_new.read_at(0, &mut new_read);
+        assert!(new_buf.eq(&new_read), "New read and new write mismatch after rename");
 
         // test rename between different directories
         let sub_folder_name = "test";
