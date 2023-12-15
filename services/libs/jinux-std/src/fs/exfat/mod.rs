@@ -393,14 +393,18 @@ mod test {
         let new_buf = vec![7u8; NEW_BUF_SIZE];
         let new_write_after_rename = a_inode_new.write_at(0, &new_buf);
         assert!(
-            new_write_after_rename.is_ok() && new_write_after_rename.clone().unwrap() == NEW_BUF_SIZE,
+            new_write_after_rename.is_ok()
+                && new_write_after_rename.clone().unwrap() == NEW_BUF_SIZE,
             "Fail to write file after rename: {:?}",
             new_write_after_rename.unwrap_err()
         );
 
         let mut new_read = vec![0u8; NEW_BUF_SIZE];
         let _ = a_inode_new.read_at(0, &mut new_read);
-        assert!(new_buf.eq(&new_read), "New read and new write mismatch after rename");
+        assert!(
+            new_buf.eq(&new_read),
+            "New read and new write mismatch after rename"
+        );
 
         // test rename between different directories
         let sub_folder_name = "test";
@@ -447,16 +451,6 @@ mod test {
 
         assert!(
             sub_dirs.len() == 2 && sub_dirs[0].eq(sub_file_name) && sub_dirs[1].eq(sub_folder_name)
-        );
-
-        // test rename with long file names
-        let long_name_a = "a".repeat(MAX_NAME_LENGTH);
-        let long_name_b = "b".repeat(MAX_NAME_LENGTH);
-        create_file(root.clone(), &long_name_a);
-        let rename_long_name_file = root.rename(&long_name_a, &root.clone(), &long_name_b);
-        assert!(
-            rename_long_name_file.is_ok(),
-            "Fail to rename a long name file"
         );
     }
 

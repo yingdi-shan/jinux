@@ -11,7 +11,7 @@ use super::constants::*;
 use super::dentry::{
     Checksum, ExfatDentry, ExfatDentrySet, ExfatFileDentry, ExfatName, DENTRY_SIZE,
 };
-use super::fat::{ClusterID, ExfatChainPosition, FatChainFlags, FatTrait, FatValue};
+use super::fat::{ClusterID, ExfatChainPosition, FatChainFlags, FatValue};
 use super::fs::{ExfatMountOptions, EXFAT_ROOT_INO};
 use super::utils::{make_hash_index, DosTimestamp};
 use crate::events::IoEvents;
@@ -1368,26 +1368,27 @@ impl Inode for ExfatInode {
         let mut exist_inode: Arc<ExfatInode> = ExfatInode::default().into();
         let mut exist_offset: usize = 0;
         let mut exist_len: usize = 0;
-        let need_to_remove_exist = if let Ok((node, offset, len)) =
-            target_.0.read().lookup_by_name(new_name)
-        {
-            exist_inode = node;
-            exist_offset = offset;
-            exist_len = len;
-            // check for a corner case here
-            // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
-            if old_inode.0.write().inode_type.is_directory() && !exist_inode.0.read().is_empty_dir()? {
-                return_errno!(Errno::ENOTEMPTY)
-            }
-            if old_inode.0.write().inode_type.is_reguler_file()
-                && exist_inode.0.read().inode_type.is_directory()
-            {
-                return_errno!(Errno::EISDIR)
-            }
-            true
-        } else {
-            false
-        };
+        let need_to_remove_exist =
+            if let Ok((node, offset, len)) = target_.0.read().lookup_by_name(new_name) {
+                exist_inode = node;
+                exist_offset = offset;
+                exist_len = len;
+                // check for a corner case here
+                // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
+                if old_inode.0.write().inode_type.is_directory()
+                    && !exist_inode.0.read().is_empty_dir()?
+                {
+                    return_errno!(Errno::ENOTEMPTY)
+                }
+                if old_inode.0.write().inode_type.is_reguler_file()
+                    && exist_inode.0.read().inode_type.is_directory()
+                {
+                    return_errno!(Errno::EISDIR)
+                }
+                true
+            } else {
+                false
+            };
 
         // copy the dentries
         let new_inode =

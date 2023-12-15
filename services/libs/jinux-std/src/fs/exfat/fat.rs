@@ -1,7 +1,6 @@
 use core::mem::size_of;
 use jinux_frame::vm::VmFrame;
 
-use super::super_block::ExfatSuperBlock;
 use super::{bitmap::EXFAT_RESERVED_CLUSTERS, fs::ExfatFS};
 use crate::prelude::*;
 
@@ -18,7 +17,6 @@ pub enum FatValue {
 pub const EXFAT_EOF_CLUSTER: ClusterID = 0xFFFFFFFF;
 pub const EXFAT_BAD_CLUSTER: ClusterID = 0xFFFFFFF7;
 pub const EXFAT_FREE_CLUSTER: ClusterID = 0;
-
 pub const FAT_ENTRY_SIZE: usize = size_of::<ClusterID>();
 
 impl From<ClusterID> for FatValue {
@@ -40,52 +38,6 @@ impl From<FatValue> for ClusterID {
             FatValue::Bad => EXFAT_BAD_CLUSTER,
             FatValue::Next(x) => x,
         }
-    }
-}
-
-pub trait FatTrait {
-    fn read_next_fat(&self, cluster: ClusterID) -> Result<FatValue>;
-    fn write_next_fat(&self, cluster: ClusterID, value: FatValue) -> Result<()>;
-}
-
-impl FatTrait for ExfatFS {
-    fn read_next_fat(&self, cluster: ClusterID) -> Result<FatValue> {
-        let sb: ExfatSuperBlock = self.super_block();
-        let sector_size = sb.sector_size;
-
-        if !self.is_valid_cluster(cluster) {
-            return_errno_with_message!(Errno::EIO, "invalid access to FAT")
-        }
-
-        let position =
-            sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
-        let mut buf: [u8; FAT_ENTRY_SIZE] = [0; FAT_ENTRY_SIZE];
-        self.block_device().read_at(position as usize, &mut buf)?;
-
-        let value = u32::from_le_bytes(buf);
-        Ok(FatValue::from(value))
-    }
-
-    fn write_next_fat(&self, cluster: ClusterID, value: FatValue) -> Result<()> {
-        let sb: ExfatSuperBlock = self.super_block();
-        let sector_size = sb.sector_size;
-
-        let position =
-            sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
-        let raw_value: u32 = value.into();
-
-        //TODO: should make sure that the write is synchronous.
-        self.block_device()
-            .write_at(position as usize, &raw_value.to_le_bytes())?;
-
-        if sb.fat1_start_sector != sb.fat2_start_sector {
-            let mirror_position = sb.fat2_start_sector * sector_size as u64
-                + (cluster as u64) * FAT_ENTRY_SIZE as u64;
-            self.block_device()
-                .write_at(mirror_position as usize, &raw_value.to_le_bytes())?;
-        }
-
-        Ok(())
     }
 }
 

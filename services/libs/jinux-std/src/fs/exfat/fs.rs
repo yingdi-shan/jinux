@@ -1,9 +1,9 @@
-use core::{ops::Range, sync::atomic::AtomicUsize};
+use core::{num::NonZeroUsize, ops::Range, sync::atomic::AtomicUsize};
 
 use super::{
     bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS},
     block_device::BlockDevice,
-    fat::ClusterID,
+    fat::{ClusterID, FatValue, FAT_ENTRY_SIZE},
     inode::ExfatInode,
     super_block::ExfatSuperBlock,
     upcase_table::ExfatUpcaseTable,
@@ -19,6 +19,7 @@ use crate::{
     return_errno_with_message,
 };
 use alloc::boxed::Box;
+use lru::LruCache;
 
 use super::super_block::ExfatBootSector;
 
@@ -43,9 +44,14 @@ pub struct ExfatFS {
     //inodes are indexed by their hash_value.
     inodes: RwLock<HashMap<usize, Arc<ExfatInode>>>,
 
+    //Cache for fat table
+    fat_cache: RwLock<LruCache<ClusterID, ClusterID>>,
+
     //A global lock, We need to hold the mutex before accessing bitmap or inode, otherwise there will be deadlocks.
     mutex: SpinLock<()>,
 }
+
+const LRU_CACHE_SIZE: usize = 1024;
 
 pub const EXFAT_ROOT_INO: Ino = 1;
 
@@ -65,6 +71,9 @@ impl ExfatFS {
             mount_option,
             highest_inode_number: AtomicUsize::new(EXFAT_ROOT_INO + 1),
             inodes: RwLock::new(HashMap::new()),
+            fat_cache: RwLock::new(LruCache::<ClusterID, ClusterID>::new(
+                NonZeroUsize::new(LRU_CACHE_SIZE).unwrap(),
+            )),
             mutex: SpinLock::new(()),
         });
 
@@ -102,8 +111,59 @@ impl ExfatFS {
         let _ = self.inodes.write().remove(&hash);
     }
 
-    pub(super) fn insert_inode(&self, inode: Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {
+    pub fn insert_inode(&self, inode: Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {
         self.inodes.write().insert(inode.hash_index(), inode)
+    }
+
+    pub fn read_next_fat(&self, cluster: ClusterID) -> Result<FatValue> {
+        let mut cache_inner = self.fat_cache.write();
+
+        let cache = cache_inner.get(&cluster);
+        if let Some(&value) = cache {
+            return Ok(FatValue::from(value));
+        }
+
+        let sb: ExfatSuperBlock = self.super_block();
+        let sector_size = sb.sector_size;
+
+        if !self.is_valid_cluster(cluster) {
+            return_errno_with_message!(Errno::EIO, "invalid access to FAT")
+        }
+
+        let position =
+            sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
+        let mut buf: [u8; FAT_ENTRY_SIZE] = [0; FAT_ENTRY_SIZE];
+        self.block_device().read_at(position as usize, &mut buf)?;
+
+        let value = u32::from_le_bytes(buf);
+        cache_inner.put(cluster, value);
+
+        Ok(FatValue::from(value))
+    }
+
+    pub fn write_next_fat(&self, cluster: ClusterID, value: FatValue) -> Result<()> {
+        let sb: ExfatSuperBlock = self.super_block();
+        let sector_size = sb.sector_size;
+        let raw_value: u32 = value.into();
+
+        //We expect the fat table to change less frequently, so we write its content to disk immediately instead of absorbing it.
+        let position =
+            sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
+
+        self.block_device()
+            .write_at(position as usize, &raw_value.to_le_bytes())?;
+
+        if sb.fat1_start_sector != sb.fat2_start_sector {
+            let mirror_position = sb.fat2_start_sector * sector_size as u64
+                + (cluster as u64) * FAT_ENTRY_SIZE as u64;
+            self.block_device()
+                .write_at(mirror_position as usize, &raw_value.to_le_bytes())?;
+        }
+
+        let mut cache_inner = self.fat_cache.write();
+        cache_inner.put(cluster, raw_value);
+
+        Ok(())
     }
 
     fn build_root(fs: Weak<ExfatFS>) -> Result<Arc<ExfatInode>> {
