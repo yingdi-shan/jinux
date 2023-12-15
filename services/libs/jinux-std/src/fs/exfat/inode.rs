@@ -981,6 +981,17 @@ impl ExfatInodeInner {
         // FIXME: We must make sure that there are no spare tailing clusters in a directory.
         Ok(())
     }
+
+    fn copy_metadata_from(&mut self, inode: Arc<ExfatInode>) {
+        let inner = inode.0.read();
+        self.dentry_set_position = inner.dentry_set_position.clone();
+        self.dentry_set_size = inner.dentry_set_size;
+        self.dentry_entry = inner.dentry_entry;
+        self.atime = inner.atime;
+        self.ctime = inner.ctime;
+        self.mtime = inner.mtime;
+        self.name = ExfatName::from_str(&inner.name.to_string()).unwrap();
+    }
 }
 
 impl Inode for ExfatInode {
@@ -1364,36 +1375,23 @@ impl Inode for ExfatInode {
 
         // read 'old_name' file or dir and its dentries
         let (old_inode, old_offset, old_len) = self.0.read().lookup_by_name(old_name)?;
-        let old_inode_inner = old_inode.0.read();
-        // flush page cache of old_name
-        old_inode_inner
-            .page_cache
-            .pages()
-            .decommit(0..old_inode_inner.size)?;
 
-        let mut exist_inode: Arc<ExfatInode> = ExfatInode::default().into();
-        let mut exist_offset: usize = 0;
-        let mut exist_len: usize = 0;
-        let need_to_remove_exist = if let Ok((node, offset, len)) =
-            target_.0.read().lookup_by_name(new_name)
-        {
-            exist_inode = node;
-            exist_offset = offset;
-            exist_len = len;
-            // check for a corner case here
+        let lookup_exist_result = target_.0.read().lookup_by_name(new_name);
+        if let Ok((ref exist_inode, exist_offset, exist_len)) = lookup_exist_result {
+            // check for two corner cases here
             // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
-            if old_inode_inner.inode_type.is_directory() && !exist_inode.0.read().is_empty_dir()? {
+            if old_inode.0.write().inode_type.is_directory()
+                && !exist_inode.0.read().is_empty_dir()?
+            {
                 return_errno!(Errno::ENOTEMPTY)
             }
-            if old_inode_inner.inode_type.is_reguler_file()
+            // if 'old_name' represents a file, the exist 'new_name' must also represents a file.
+            if old_inode.0.write().inode_type.is_reguler_file()
                 && exist_inode.0.read().inode_type.is_directory()
             {
                 return_errno!(Errno::EISDIR)
             }
-            true
-        } else {
-            false
-        };
+        }
 
         // copy the dentries
         let new_inode =
@@ -1402,21 +1400,18 @@ impl Inode for ExfatInode {
                 .write()
                 .add_entry(new_name, old_inode.type_(), old_inode.mode())?;
 
-        let mut new_inode_inner = new_inode.0.write();
-        new_inode_inner.start_chain = ExfatChain::new(
-            Arc::downgrade(&fs),
-            old_inode_inner.start_chain.cluster_id(),
-            old_inode_inner.start_chain.flags(),
-        );
-        new_inode_inner.size = old_inode_inner.size;
-        new_inode_inner.size_allocated = old_inode_inner.size_allocated;
-        new_inode_inner.write_inode(true)?;
+        // evict old_inode
+        fs.evict_inode(old_inode.0.write().hash_index());
+        // update metadata
+        old_inode.0.write().copy_metadata_from(new_inode);
+        // insert back
+        let _ = fs.insert_inode(old_inode);
 
         // delete 'old_name' dentries
         self.0.write().delete_dentry_set(old_offset, old_len)?;
 
-        // remove the exist 'new_name' file(include file contents and dentries)
-        if need_to_remove_exist {
+        // remove the exist 'new_name' file(include file contents, inode and dentries)
+        if let Ok((exist_inode, exist_offset, exist_len)) = lookup_exist_result {
             fs.evict_inode(exist_inode.hash_index());
             exist_inode.0.write().resize(0)?;
             target_

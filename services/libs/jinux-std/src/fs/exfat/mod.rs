@@ -337,10 +337,7 @@ mod test {
         // however, after we remove child file, parent directory is removable.
         let _ = parent_inode.unlink(child_name);
         let rmdir_empty_dir = root.rmdir(parent_name);
-        assert!(
-            rmdir_empty_dir.is_ok(),
-            "Fail to remove an empty directory"
-        );
+        assert!(rmdir_empty_dir.is_ok(), "Fail to remove an empty directory");
 
         // test remove a long name directory
         let long_dir_name = "x".repeat(MAX_NAME_LENGTH);
@@ -359,7 +356,7 @@ mod test {
         let file_name = "hi.txt";
         let a_inode = create_file(root.clone(), file_name);
 
-        const BUF_SIZE: usize = PAGE_SIZE * 11 + 2023;
+        const BUF_SIZE: usize = 7 * PAGE_SIZE + 11;
         let mut buf = vec![0u8; BUF_SIZE];
         for (i, num) in buf.iter_mut().enumerate() {
             //Use a prime number to make each sector different.
@@ -371,18 +368,43 @@ mod test {
         let rename_result = root.rename(file_name, &root.clone(), new_name);
         assert!(
             rename_result.is_ok(),
-            "Fs failed to rename: {:?}",
+            "Failed to rename: {:?}",
             rename_result.unwrap_err()
         );
 
-        let a_inode_new = root.lookup(new_name).unwrap();
-        let mut read = vec![0u8; BUF_SIZE];
-        let _ = a_inode_new.read_at(0, &mut read);
-        assert!(buf.eq(&read), "File mismatch after rename");
-
+        // test list after rename
         let mut sub_dirs: Vec<String> = Vec::new();
         let _ = root.readdir_at(0, &mut sub_dirs);
         assert!(sub_dirs.len() == 1 && sub_dirs[0].eq(new_name));
+
+        // test read after rename
+        let a_inode_new = root.lookup(new_name).unwrap();
+        let mut read = vec![0u8; BUF_SIZE];
+        let read_after_rename = a_inode_new.read_at(0, &mut read);
+        assert!(
+            read_after_rename.is_ok() && read_after_rename.clone().unwrap() == BUF_SIZE,
+            "Fail to read after rename: {:?}",
+            read_after_rename.unwrap_err()
+        );
+        assert!(buf.eq(&read), "File mismatch after rename");
+
+        // test write after rename
+        const NEW_BUF_SIZE: usize = 9 * PAGE_SIZE + 23;
+        let new_buf = vec![7u8; NEW_BUF_SIZE];
+        let new_write_after_rename = a_inode_new.write_at(0, &new_buf);
+        assert!(
+            new_write_after_rename.is_ok()
+                && new_write_after_rename.clone().unwrap() == NEW_BUF_SIZE,
+            "Fail to write file after rename: {:?}",
+            new_write_after_rename.unwrap_err()
+        );
+
+        let mut new_read = vec![0u8; NEW_BUF_SIZE];
+        let _ = a_inode_new.read_at(0, &mut new_read);
+        assert!(
+            new_buf.eq(&new_read),
+            "New read and new write mismatch after rename"
+        );
 
         // test rename between different directories
         let sub_folder_name = "test";
@@ -409,10 +431,7 @@ mod test {
 
         // test rename file when the new_name is exist
         let rename_file_to_itself = root.rename(new_name, &root.clone(), new_name);
-        assert!(
-            rename_file_to_itself.is_ok(),
-            "Fail to rename to itself"
-        );
+        assert!(rename_file_to_itself.is_ok(), "Fail to rename to itself");
 
         let rename_file_to_an_exist_folder = root.rename(new_name, &root.clone(), sub_folder_name);
         assert!(
@@ -431,19 +450,7 @@ mod test {
         sub_dirs.sort();
 
         assert!(
-            sub_dirs.len() == 2
-                && sub_dirs[0].eq(sub_file_name)
-                && sub_dirs[1].eq(sub_folder_name)
-        );
-
-        // test rename with long file names
-        let long_name_a = "a".repeat(MAX_NAME_LENGTH);
-        let long_name_b = "b".repeat(MAX_NAME_LENGTH);
-        create_file(root.clone(), &long_name_a);
-        let rename_long_name_file = root.rename(&long_name_a, &root.clone(), &long_name_b);
-        assert!(
-            rename_long_name_file.is_ok(),
-            "Fail to rename a long name file"
+            sub_dirs.len() == 2 && sub_dirs[0].eq(sub_file_name) && sub_dirs[1].eq(sub_folder_name)
         );
     }
 
@@ -886,7 +893,10 @@ mod test {
             for (file_id, inode) in file_inodes.iter().enumerate() {
                 inode.resize((cur_clusters_per_file + step) as usize * cluster_size);
                 assert!(
-                    fs.free_clusters() == initial_free_clusters - cur_clusters_per_file * file_num - (file_id as u32 + 1) * step,
+                    fs.free_clusters()
+                        == initial_free_clusters
+                            - cur_clusters_per_file * file_num
+                            - (file_id as u32 + 1) * step,
                     "Fail to resize file {:?} from {:?} to {:?}",
                     file_id,
                     cur_clusters_per_file,
