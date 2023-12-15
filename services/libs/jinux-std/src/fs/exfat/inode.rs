@@ -981,6 +981,17 @@ impl ExfatInodeInner {
         // FIXME: We must make sure that there are no spare tailing clusters in a directory.
         Ok(())
     }
+
+    fn copy_metadata_from(&mut self, inode: Arc<ExfatInode>) {
+        let inner = inode.0.read();
+        self.dentry_set_position = inner.dentry_set_position.clone();
+        self.dentry_set_size = inner.dentry_set_size;
+        self.dentry_entry = inner.dentry_entry;
+        self.atime = inner.atime;
+        self.ctime = inner.ctime;
+        self.mtime = inner.mtime;
+        self.name = ExfatName::from_str(&inner.name.to_string()).unwrap();
+    }
 }
 
 impl Inode for ExfatInode {
@@ -1365,30 +1376,22 @@ impl Inode for ExfatInode {
         // read 'old_name' file or dir and its dentries
         let (old_inode, old_offset, old_len) = self.0.read().lookup_by_name(old_name)?;
 
-        let mut exist_inode: Arc<ExfatInode> = ExfatInode::default().into();
-        let mut exist_offset: usize = 0;
-        let mut exist_len: usize = 0;
-        let need_to_remove_exist =
-            if let Ok((node, offset, len)) = target_.0.read().lookup_by_name(new_name) {
-                exist_inode = node;
-                exist_offset = offset;
-                exist_len = len;
-                // check for a corner case here
-                // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
-                if old_inode.0.write().inode_type.is_directory()
-                    && !exist_inode.0.read().is_empty_dir()?
-                {
-                    return_errno!(Errno::ENOTEMPTY)
-                }
-                if old_inode.0.write().inode_type.is_reguler_file()
-                    && exist_inode.0.read().inode_type.is_directory()
-                {
-                    return_errno!(Errno::EISDIR)
-                }
-                true
-            } else {
-                false
-            };
+        let lookup_exist_result = target_.0.read().lookup_by_name(new_name);
+        if let Ok((ref exist_inode, exist_offset, exist_len)) = lookup_exist_result {
+            // check for two corner cases here
+            // if 'old_name' represents a directory, the exist 'new_name' must represents a empty directory.
+            if old_inode.0.write().inode_type.is_directory()
+                && !exist_inode.0.read().is_empty_dir()?
+            {
+                return_errno!(Errno::ENOTEMPTY)
+            }
+            // if 'old_name' represents a file, the exist 'new_name' must also represents a file.
+            if old_inode.0.write().inode_type.is_reguler_file()
+                && exist_inode.0.read().inode_type.is_directory()
+            {
+                return_errno!(Errno::EISDIR)
+            }
+        }
 
         // copy the dentries
         let new_inode =
@@ -1400,14 +1403,7 @@ impl Inode for ExfatInode {
         // evict old_inode
         fs.evict_inode(old_inode.0.write().hash_index());
         // update metadata
-        let new_inode_inner = new_inode.0.read();
-        old_inode.0.write().dentry_set_position = new_inode_inner.dentry_set_position.clone();
-        old_inode.0.write().dentry_set_size = new_inode_inner.dentry_set_size;
-        old_inode.0.write().dentry_entry = new_inode_inner.dentry_entry;
-        old_inode.0.write().atime = new_inode_inner.atime;
-        old_inode.0.write().ctime = new_inode_inner.ctime;
-        old_inode.0.write().mtime = new_inode_inner.mtime;
-        old_inode.0.write().name = ExfatName::from_str(&new_inode_inner.name.to_string())?;
+        old_inode.0.write().copy_metadata_from(new_inode);
         // insert back
         let _ = fs.insert_inode(old_inode);
 
@@ -1415,7 +1411,7 @@ impl Inode for ExfatInode {
         self.0.write().delete_dentry_set(old_offset, old_len)?;
 
         // remove the exist 'new_name' file(include file contents, inode and dentries)
-        if need_to_remove_exist {
+        if let Ok((exist_inode, exist_offset, exist_len)) = lookup_exist_result {
             fs.evict_inode(exist_inode.hash_index());
             exist_inode.0.write().resize(0)?;
             target_
