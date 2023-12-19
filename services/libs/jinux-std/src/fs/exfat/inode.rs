@@ -424,6 +424,14 @@ impl ExfatInodeInner {
             match fs.read_next_fat(cur_cluster)? {
                 FatValue::Next(data) => {
                     cur_cluster = data;
+                    if i == free_num - 1 {
+                        return_errno_with_message!(Errno::EINVAL, "invalid fat entry")
+                    }
+                }
+                FatValue::EndOfChain => {
+                    if i != free_num - 1 {
+                        return_errno_with_message!(Errno::EINVAL, "invalid fat entry")
+                    }
                 }
                 _ => return_errno_with_message!(Errno::EINVAL, "invalid fat entry"),
             }
@@ -1002,6 +1010,12 @@ impl Inode for ExfatInode {
     fn resize(&self, new_size: usize) {
         //FIXME: how to return error?
         let mut inner = self.0.write();
+        //error!("RESIZE: resize from {:?} to {:?}", inner.size, new_size);
+        if inner.size > new_size {
+            //error!("RESIZE: need to shrink the file, resize pagecache");
+            let _ = inner.page_cache.pages().resize(new_size);
+        }
+        //error!("RESIZE: resize the file");
         let _ = inner.lock_and_resize(new_size);
     }
 
@@ -1106,7 +1120,7 @@ impl Inode for ExfatInode {
         if inner.inode_type.is_directory() {
             return_errno!(Errno::EISDIR)
         }
-        let (off, read_len) = {
+        let (read_off, read_len) = {
             let file_size = inner.size;
             let start = file_size.min(offset);
             let end = file_size.min(offset + buf.len());
@@ -1115,7 +1129,7 @@ impl Inode for ExfatInode {
         inner
             .page_cache
             .pages()
-            .read_bytes(offset, &mut buf[..read_len])?;
+            .read_bytes(read_off, &mut buf[..read_len])?;
 
         Ok(read_len)
     }
@@ -1132,7 +1146,7 @@ impl Inode for ExfatInode {
 
         let sector_size = inner.fs().sector_size();
 
-        let (offset, read_len) = {
+        let (read_off, read_len) = {
             let file_size = inner.size;
             let start = file_size.min(offset).align_down(sector_size);
             let end = file_size.min(offset + buf.len()).align_down(sector_size);
@@ -1142,12 +1156,12 @@ impl Inode for ExfatInode {
         inner
             .page_cache()
             .pages()
-            .decommit(offset..offset + read_len)?;
+            .decommit(read_off..read_off + read_len)?;
 
         let mut buf_offset = 0;
         let frame = VmAllocOptions::new(1).uninit(true).alloc_single().unwrap();
 
-        for bid in offset / sector_size..(offset + read_len) / sector_size {
+        for bid in read_off / sector_size..(read_off + read_len) / sector_size {
             inner.read_sector(bid, &frame)?;
             frame.read_bytes(0, &mut buf[buf_offset..buf_offset + sector_size])?;
             buf_offset += sector_size;
