@@ -170,7 +170,7 @@ impl<'a> Iterator for VmFrameVecIter<'a> {
 }
 
 bitflags::bitflags! {
-    pub(crate) struct VmFrameFlags : usize{
+    pub(crate) struct VmFrameFlags : usize {
         const NEED_DEALLOC =    1 << 63;
     }
 }
@@ -530,6 +530,11 @@ impl<'a> VmReader<'a> {
         unsafe { self.end.sub_ptr(self.cursor) }
     }
 
+    /// Returns the cursor pointer.
+    pub const fn cursor(&self) -> *const u8 {
+        self.cursor
+    }
+
     /// Returns if it has remaining data to read.
     pub const fn has_remain(&self) -> bool {
         self.remain() > 0
@@ -538,7 +543,7 @@ impl<'a> VmReader<'a> {
     /// Limits the length of remaining data.
     ///
     /// This method ensures the postcondition of `self.remain() <= max_remain`.
-    pub const fn limit(&mut self, max_remain: usize) -> &mut Self {
+    pub const fn limit(mut self, max_remain: usize) -> Self {
         if max_remain < self.remain() {
             // Safety: the new end is less than the old end.
             unsafe { self.end = self.cursor.add(max_remain) };
@@ -552,7 +557,7 @@ impl<'a> VmReader<'a> {
     /// # Panic
     ///
     /// If `nbytes` is greater than `self.remain()`, then the method panics.
-    pub fn skip(&mut self, nbytes: usize) -> &mut Self {
+    pub fn skip(mut self, nbytes: usize) -> Self {
         assert!(nbytes <= self.remain());
 
         // Safety: the new cursor is less than or equal to the end.
@@ -635,6 +640,11 @@ impl<'a> VmWriter<'a> {
         unsafe { self.end.sub_ptr(self.cursor) }
     }
 
+    /// Returns the cursor pointer.
+    pub const fn cursor(&self) -> *mut u8 {
+        self.cursor
+    }
+
     /// Returns if it has avaliable space to write.
     pub const fn has_avail(&self) -> bool {
         self.avail() > 0
@@ -643,7 +653,7 @@ impl<'a> VmWriter<'a> {
     /// Limits the length of available space.
     ///
     /// This method ensures the postcondition of `self.avail() <= max_avail`.
-    pub const fn limit(&mut self, max_avail: usize) -> &mut Self {
+    pub const fn limit(mut self, max_avail: usize) -> Self {
         if max_avail < self.avail() {
             // Safety: the new end is less than the old end.
             unsafe { self.end = self.cursor.add(max_avail) };
@@ -657,7 +667,7 @@ impl<'a> VmWriter<'a> {
     /// # Panic
     ///
     /// If `nbytes` is greater than `self.avail()`, then the method panics.
-    pub fn skip(&mut self, nbytes: usize) -> &mut Self {
+    pub fn skip(mut self, nbytes: usize) -> Self {
         assert!(nbytes <= self.avail());
 
         // Safety: the new cursor is less than or equal to the end.

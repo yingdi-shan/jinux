@@ -3,8 +3,10 @@ use core::time::Duration;
 
 use crate::prelude::*;
 
+use jinux_time::read_monotonic_time;
+
 mod system_time;
-use jinux_frame::timer::read_monotonic_milli_seconds;
+
 pub use system_time::SystemTime;
 
 pub type clockid_t = i32;
@@ -76,13 +78,8 @@ pub fn now_as_duration(clock_id: &ClockID) -> Result<Duration> {
     match clock_id {
         ClockID::CLOCK_MONOTONIC
         | ClockID::CLOCK_MONOTONIC_COARSE
-        | ClockID::CLOCK_MONOTONIC_RAW => {
-            let time_ms = read_monotonic_milli_seconds();
-
-            let seconds = time_ms / 1000;
-            let nanos = time_ms % 1000 * 1_000_000;
-            Ok(Duration::new(seconds, nanos as u32))
-        }
+        | ClockID::CLOCK_MONOTONIC_RAW
+        | ClockID::CLOCK_BOOTTIME => Ok(read_monotonic_time()),
         ClockID::CLOCK_REALTIME | ClockID::CLOCK_REALTIME_COARSE => {
             let now = SystemTime::now();
             now.duration_since(&SystemTime::UNIX_EPOCH)
@@ -95,5 +92,27 @@ pub fn now_as_duration(clock_id: &ClockID) -> Result<Duration> {
             let now = SystemTime::now();
             now.duration_since(&SystemTime::UNIX_EPOCH)
         }
+    }
+}
+
+/// Unix time measures time by the number of seconds that have elapsed since
+/// the Unix epoch, without adjustments made due to leap seconds.
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, Pod)]
+pub struct UnixTime {
+    sec: u32,
+}
+
+impl From<Duration> for UnixTime {
+    fn from(duration: Duration) -> Self {
+        Self {
+            sec: duration.as_secs() as u32,
+        }
+    }
+}
+
+impl From<UnixTime> for Duration {
+    fn from(time: UnixTime) -> Self {
+        Duration::from_secs(time.sec as _)
     }
 }

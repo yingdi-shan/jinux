@@ -1,6 +1,7 @@
 #!/bin/sh
 
 SCRIPT_DIR=$(dirname "$0")
+TEST_TMP_DIR=${TEST_TMPDIR:-/tmp}
 TEST_BIN_DIR=$SCRIPT_DIR/tests
 BLOCKLIST_DIR=$SCRIPT_DIR/blocklists
 FAIL_CASES=$SCRIPT_DIR/fail_cases
@@ -26,6 +27,7 @@ run_one_test(){
     echo -e "Run Test Case: $1"
     ret=0
     if [ -f $TEST_BIN_DIR/$1 ]; then
+        rm -rf $TEST_TMP_DIR/*
         get_blocklist_subtests $1
         $TEST_BIN_DIR/$1 --gtest_filter=-$BLOCK
         ret=$?

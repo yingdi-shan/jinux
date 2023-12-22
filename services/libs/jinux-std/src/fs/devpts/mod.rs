@@ -7,7 +7,6 @@ use crate::fs::utils::{
 use crate::prelude::*;
 
 use core::time::Duration;
-use jinux_frame::vm::VmFrame;
 use jinux_util::{id_allocator::IdAlloc, slot_vec::SlotVec};
 
 use self::ptmx::Ptmx;
@@ -140,10 +139,16 @@ impl Inode for RootInode {
         self.metadata.size
     }
 
-    fn resize(&self, new_size: usize) {}
+    fn resize(&self, new_size: usize) -> Result<()> {
+        Err(Error::new(Errno::EISDIR))
+    }
 
     fn metadata(&self) -> Metadata {
         self.metadata.clone()
+    }
+
+    fn ino(&self) -> u64 {
+        self.metadata.ino as _
     }
 
     fn type_(&self) -> InodeType {

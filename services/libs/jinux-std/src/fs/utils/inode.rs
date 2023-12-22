@@ -1,6 +1,5 @@
 use core::time::Duration;
 use core2::io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult, Write};
-use jinux_frame::vm::VmFrame;
 use jinux_rights::Full;
 
 use super::{DirentVisitor, FileSystem, IoctlCmd, SuperBlock};
@@ -51,6 +50,7 @@ impl From<DeviceType> for InodeType {
         match type_ {
             DeviceType::CharDevice => InodeType::CharDevice,
             DeviceType::BlockDevice => InodeType::BlockDevice,
+            DeviceType::MiscDevice => InodeType::CharDevice,
         }
     }
 }
@@ -231,9 +231,11 @@ pub trait Inode: Any + Sync + Send {
         self.len() == 0
     }
 
-    fn resize(&self, new_size: usize);
+    fn resize(&self, new_size: usize) -> Result<()>;
 
     fn metadata(&self) -> Metadata;
+
+    fn ino(&self) -> u64;
 
     fn type_(&self) -> InodeType;
 
@@ -248,14 +250,6 @@ pub trait Inode: Any + Sync + Send {
     fn mtime(&self) -> Duration;
 
     fn set_mtime(&self, time: Duration);
-
-    fn read_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
-        Err(Error::new(Errno::EISDIR))
-    }
-
-    fn write_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
-        Err(Error::new(Errno::EISDIR))
-    }
 
     fn page_cache(&self) -> Option<Vmo<Full>> {
         None

@@ -2,7 +2,7 @@ use crate::fs::exfat::dentry::ExfatDentryIterator;
 use crate::fs::exfat::fat::ExfatChain;
 
 use crate::fs::exfat::fs::ExfatFS;
-use crate::fs::utils::{Inode, InodeType, Metadata, PageCache};
+use crate::fs::utils::{Inode, InodeType, Metadata, PageCache, PageCacheBackend};
 use crate::time::now_as_duration;
 
 use super::block_device::{is_block_aligned, SECTOR_SIZE};
@@ -797,21 +797,59 @@ impl ExfatInodeInner {
     }
 }
 
+impl PageCacheBackend for ExfatInode {
+    fn read_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
+        let inner = self.0.read();
+        if inner.size < idx * PAGE_SIZE {
+            return_errno_with_message!(Errno::EINVAL, "Invalid read size")
+        }
+        let sector_id = inner.get_sector_id(idx * PAGE_SIZE / inner.fs().sector_size())?;
+        inner
+            .fs()
+            .block_device()
+            .read_page(sector_id * inner.fs().sector_size() / PAGE_SIZE, frame)?;
+        Ok(())
+    }
+
+    //What if block_size is not equal to page size?
+    fn write_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
+        let inner = self.0.read();
+        let sector_size = inner.fs().sector_size();
+        //FIXME: dead lock may occur here.
+
+        let sector_id = inner.get_sector_id(idx * PAGE_SIZE / SECTOR_SIZE)?;
+
+        //FIXME: We may need to truncate the file if write_page fails?
+        inner
+            .fs()
+            .block_device()
+            .write_page(sector_id * inner.fs().sector_size() / PAGE_SIZE, frame)?;
+
+        Ok(())
+    }
+
+    fn num_pages(&self) -> usize {
+        let inner = self.0.read();
+        inner.size_allocated.align_up(PAGE_SIZE) / PAGE_SIZE
+    }
+}
+
 impl Inode for ExfatInode {
+    fn ino(&self) -> u64 {
+        self.0.read().ino as u64
+    }
+
     fn len(&self) -> usize {
         self.0.read().size
     }
 
-    fn resize(&self, new_size: usize) {
-        //FIXME: how to return error?
+    fn resize(&self, new_size: usize) -> Result<()> {
         let mut inner = self.0.write();
-        //error!("RESIZE: resize from {:?} to {:?}", inner.size, new_size);
-        if inner.size > new_size {
-            //error!("RESIZE: need to shrink the file, resize pagecache");
-            let _ = inner.page_cache.pages().resize(new_size);
-        }
-        //error!("RESIZE: resize the file");
-        let _ = inner.lock_and_resize(new_size);
+
+        //We must resize the inode before resizing the pagecache, to avoid the flush of extra dirty pages.
+        inner.lock_and_resize(new_size)?;
+
+        inner.page_cache.pages().resize(new_size)
     }
 
     fn metadata(&self) -> crate::fs::utils::Metadata {
@@ -874,36 +912,6 @@ impl Inode for ExfatInode {
 
     fn fs(&self) -> alloc::sync::Arc<dyn crate::fs::utils::FileSystem> {
         self.0.read().fs()
-    }
-
-    fn read_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
-        let inner = self.0.read();
-        if inner.size < idx * PAGE_SIZE {
-            return_errno_with_message!(Errno::EINVAL, "Invalid read size")
-        }
-        let sector_id = inner.get_sector_id(idx * PAGE_SIZE / inner.fs().sector_size())?;
-        inner
-            .fs()
-            .block_device()
-            .read_page(sector_id * inner.fs().sector_size() / PAGE_SIZE, frame)?;
-        Ok(())
-    }
-
-    //What if block_size is not equal to page size?
-    fn write_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
-        let inner = self.0.read();
-        let sector_size = inner.fs().sector_size();
-        //FIXME: dead lock may occur here.
-
-        let sector_id = inner.get_sector_id(idx * PAGE_SIZE / SECTOR_SIZE)?;
-
-        //FIXME: We may need to truncate the file if write_page fails?
-        inner
-            .fs()
-            .block_device()
-            .write_page(sector_id * inner.fs().sector_size() / PAGE_SIZE, frame)?;
-
-        Ok(())
     }
 
     fn page_cache(&self) -> Option<Vmo<Full>> {

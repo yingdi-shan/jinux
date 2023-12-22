@@ -18,7 +18,7 @@ pub(crate) use core::ffi::CStr;
 pub(crate) use core::fmt::Debug;
 pub(crate) use int_to_c_enum::TryFromInt;
 pub(crate) use jinux_frame::config::PAGE_SIZE;
-pub(crate) use jinux_frame::sync::{Mutex, MutexGuard, RwLock, SpinLock, SpinLockGuard};
+pub(crate) use jinux_frame::sync::{Mutex, MutexGuard, RwLock, RwMutex, SpinLock, SpinLockGuard};
 pub(crate) use jinux_frame::vm::Vaddr;
 pub(crate) use log::{debug, error, info, trace, warn};
 pub(crate) use pod::Pod;
