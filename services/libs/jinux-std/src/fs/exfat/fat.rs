@@ -347,6 +347,14 @@ impl ExfatChain {
             match fs.read_next_fat(cur_cluster)? {
                 FatValue::Next(data) => {
                     cur_cluster = data;
+                    if i == drop_num - 1 {
+                        return_errno_with_message!(Errno::EINVAL, "invalid fat entry")
+                    }
+                }
+                FatValue::EndOfChain => {
+                    if i != drop_num - 1 {
+                        return_errno_with_message!(Errno::EINVAL, "invalid fat entry")
+                    }
                 }
                 _ => return_errno_with_message!(Errno::EINVAL, "invalid fat entry"),
             }
