@@ -3,7 +3,7 @@ use core::{num::NonZeroUsize, ops::Range, sync::atomic::AtomicUsize};
 use super::{
     bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS},
     block_device::BlockDevice,
-    fat::{ClusterID, FatValue, FAT_ENTRY_SIZE},
+    fat::{ClusterID, ExfatChain, FatChainFlags, FatValue, FAT_ENTRY_SIZE},
     inode::ExfatInode,
     super_block::ExfatSuperBlock,
     upcase_table::ExfatUpcaseTable,
@@ -82,9 +82,19 @@ impl ExfatFS {
         //Verify boot region
         Self::verify_boot_region(exfat_fs.block_device())?;
 
-        let upcase_table = ExfatUpcaseTable::load_upcase_table(Arc::downgrade(&exfat_fs))?;
-        let bitmap = ExfatBitmap::load_bitmap(Arc::downgrade(&exfat_fs))?;
-        let root = ExfatFS::build_root(Arc::downgrade(&exfat_fs))?;
+        let weak_fs = Arc::downgrade(&exfat_fs);
+
+        let root_chain = ExfatChain::new(
+            weak_fs.clone(),
+            super_block.root_dir,
+            None,
+            FatChainFlags::ALLOC_POSSIBLE,
+        )?;
+
+        let upcase_table =
+            ExfatUpcaseTable::load_upcase_table(weak_fs.clone(), root_chain.clone())?;
+        let bitmap = ExfatBitmap::load_bitmap(weak_fs.clone(), root_chain.clone())?;
+        let root = ExfatInode::build_root_inode(weak_fs, root_chain)?;
 
         *exfat_fs.bitmap.lock() = bitmap;
         *exfat_fs.upcase_table.lock() = upcase_table;
@@ -164,10 +174,6 @@ impl ExfatFS {
         cache_inner.put(cluster, raw_value);
 
         Ok(())
-    }
-
-    fn build_root(fs: Weak<ExfatFS>) -> Result<Arc<ExfatInode>> {
-        ExfatInode::build_root_inode(fs)
     }
 
     fn verify_boot_region(block_device: &dyn BlockDevice) -> Result<()> {

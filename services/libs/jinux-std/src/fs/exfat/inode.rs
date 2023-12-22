@@ -5,13 +5,12 @@ use crate::fs::exfat::fs::ExfatFS;
 use crate::fs::utils::{Inode, InodeType, Metadata, PageCache};
 use crate::time::now_as_duration;
 
-use super::bitmap::ExfatBitmap;
 use super::block_device::{is_block_aligned, SECTOR_SIZE};
 use super::constants::*;
 use super::dentry::{
     Checksum, ExfatDentry, ExfatDentrySet, ExfatFileDentry, ExfatName, DENTRY_SIZE,
 };
-use super::fat::{ClusterID, ExfatChainPosition, FatChainFlags, FatValue};
+use super::fat::{ClusterAllocator, ClusterID, ExfatChainPosition, FatChainFlags};
 use super::fs::{ExfatMountOptions, EXFAT_ROOT_INO};
 use super::utils::{make_hash_index, DosTimestamp};
 use crate::events::IoEvents;
@@ -49,7 +48,7 @@ impl FatAttr {
     fn make_mode(&self, mount_option: ExfatMountOptions, mode: InodeMode) -> InodeMode {
         let mut ret = mode;
         if self.contains(FatAttr::READONLY) && !self.contains(FatAttr::DIRECTORY) {
-            ret.remove(InodeMode::S_IWGRP | InodeMode::S_IWUSR | InodeMode::S_IWUSR);
+            ret.remove(InodeMode::S_IWGRP | InodeMode::S_IWUSR | InodeMode::S_IWOTH);
         }
         if self.contains(FatAttr::DIRECTORY) {
             ret.remove(InodeMode::from_bits_truncate(mount_option.fs_dmask));
@@ -64,10 +63,6 @@ impl FatAttr {
 pub struct ExfatInode(RwLock<ExfatInodeInner>);
 
 impl ExfatInode {
-    pub(super) fn default() -> Self {
-        ExfatInode(RwLock::new(ExfatInodeInner::default()))
-    }
-
     pub(super) fn hash_index(&self) -> usize {
         self.0.read().hash_index()
     }
@@ -88,7 +83,10 @@ impl ExfatInode {
         Ok(cnt)
     }
 
-    pub(super) fn build_root_inode(fs_weak: Weak<ExfatFS>) -> Result<Arc<ExfatInode>> {
+    pub(super) fn build_root_inode(
+        fs_weak: Weak<ExfatFS>,
+        root_chain: ExfatChain,
+    ) -> Result<Arc<ExfatInode>> {
         let sb = fs_weak.upgrade().unwrap().super_block();
 
         let root_cluster = sb.root_dir;
@@ -102,14 +100,11 @@ impl ExfatInode {
         let ctime =
             DosTimestamp::from_duration(now_as_duration(&crate::time::ClockID::CLOCK_REALTIME)?)?;
 
-        let start_chain =
-            ExfatChain::new(fs_weak.clone(), root_cluster, FatChainFlags::ALLOC_POSSIBLE);
-
-        let size = start_chain.count_clusters()? as usize * sb.cluster_size as usize;
+        let size = root_chain.num_clusters() as usize * sb.cluster_size as usize;
 
         let name = ExfatName::new();
 
-        let num_subdir = Self::count_num_subdir(start_chain.clone(), size)? as u32;
+        let num_subdir = Self::count_num_subdir(root_chain.clone(), size)? as u32;
 
         Ok(Arc::new_cyclic(|weak_self| {
             ExfatInode(RwLock::new(ExfatInodeInner {
@@ -119,7 +114,7 @@ impl ExfatInode {
                 dentry_entry: 0,
                 inode_type,
                 attr,
-                start_chain,
+                start_chain: root_chain,
                 size,
                 size_allocated: size,
                 atime: ctime,
@@ -191,7 +186,14 @@ impl ExfatInode {
 
         let chain_flag = FatChainFlags::from_bits_truncate(stream.flags);
         let start_cluster = stream.start_cluster;
-        let start_chain = ExfatChain::new(fs_weak.clone(), start_cluster, chain_flag);
+        let num_clusters = size_allocated.align_up(fs.cluster_size()) / fs.cluster_size();
+
+        let start_chain = ExfatChain::new(
+            fs_weak.clone(),
+            start_cluster,
+            Some(num_clusters as u32),
+            chain_flag,
+        )?;
 
         let name = dentry_set.get_name()?;
 
@@ -286,34 +288,8 @@ impl DirentVisitor for EmptyVistor {
 }
 
 impl ExfatInodeInner {
-    pub(super) fn default() -> Self {
-        Self {
-            ino: 0,
-            dentry_set_position: (ExfatChain::default(), 0),
-            dentry_set_size: 0,
-            dentry_entry: 0,
-            inode_type: InodeType::File,
-            attr: FatAttr::empty(),
-            start_chain: ExfatChain::default(),
-            size: 0,
-            size_allocated: 0,
-
-            atime: DosTimestamp::default(),
-            mtime: DosTimestamp::default(),
-            ctime: DosTimestamp::default(),
-            num_subdir: 0,
-            name: ExfatName::default(),
-            page_cache: PageCache::new(Weak::<ExfatInode>::default()).unwrap(),
-            fs: Weak::default(),
-        }
-    }
-
     pub fn fs(&self) -> Arc<ExfatFS> {
         self.fs.upgrade().unwrap()
-    }
-
-    fn cluster_position_hash(pos: &ExfatChainPosition) -> usize {
-        (pos.0.cluster_id() as usize) << 32usize | (pos.1 & 0xffffffffusize)
     }
 
     pub fn hash_index(&self) -> usize {
@@ -321,7 +297,10 @@ impl ExfatInodeInner {
             return ROOT_INODE_HASH;
         }
 
-        Self::cluster_position_hash(&self.dentry_set_position)
+        make_hash_index(
+            self.dentry_set_position.0.cluster_id(),
+            self.dentry_set_position.1 as u32,
+        )
     }
 
     pub fn make_mode(&self) -> InodeMode {
@@ -382,220 +361,27 @@ impl ExfatInodeInner {
         Ok(())
     }
 
-    // allocate clusters in fat mode, return the first allocated cluster id. Bitmap need to be already locked.
-    fn alloc_cluster_fat(
-        &mut self,
-        num_to_be_allocated: u32,
-        sync_bitmap: bool,
-        bitmap: &mut SpinLockGuard<'_, ExfatBitmap>,
-    ) -> Result<ClusterID> {
-        let fs = self.fs();
-
-        let sb = fs.super_block();
-        let mut alloc_start_cluster = 0;
-        let mut prev_cluster = 0;
-        let mut cur_cluster = EXFAT_FIRST_CLUSTER;
-        for i in 0..num_to_be_allocated {
-            cur_cluster = bitmap.find_next_free_cluster(cur_cluster)?;
-            bitmap.set_bitmap_used(cur_cluster, sync_bitmap)?;
-            if i == 0 {
-                alloc_start_cluster = cur_cluster;
-            } else {
-                fs.write_next_fat(prev_cluster, FatValue::Next(cur_cluster))?;
-            }
-            prev_cluster = cur_cluster;
-        }
-        fs.write_next_fat(prev_cluster, FatValue::EndOfChain)?;
-        Ok(alloc_start_cluster)
-    }
-
-    fn free_cluster_fat(
-        &mut self,
-        start_cluster: ClusterID,
-        free_num: u32,
-        sync_bitmap: bool,
-        bitmap: &mut SpinLockGuard<'_, ExfatBitmap>,
-    ) -> Result<()> {
-        let fs = self.fs();
-
-        let mut cur_cluster = start_cluster;
-        for i in 0..free_num {
-            bitmap.set_bitmap_unused(cur_cluster, sync_bitmap)?;
-            match fs.read_next_fat(cur_cluster)? {
-                FatValue::Next(data) => {
-                    cur_cluster = data;
-                }
-                _ => return_errno_with_message!(Errno::EINVAL, "invalid fat entry"),
-            }
-        }
-
-        Ok(())
-    }
-
     //Get the physical cluster id from the logical cluster id in the inode.
     fn get_physical_cluster(&self, logical: ClusterID) -> Result<ClusterID> {
         let chain = self.start_chain.walk(logical)?;
         Ok(chain.cluster_id())
     }
 
-    fn num_clusters(&self) -> ClusterID {
-        let cluster_size = self.fs().cluster_size();
-        (self.size_allocated.align_up(cluster_size) / cluster_size) as u32
-    }
-
-    fn fat_in_use(&self) -> bool {
-        !self
-            .start_chain
-            .flags()
-            .contains(FatChainFlags::FAT_CHAIN_NOT_IN_USE)
+    fn num_clusters(&self) -> u32 {
+        self.start_chain.num_clusters()
     }
 
     //Get the cluster id from the logical cluster id in the inode. If cluster not exist, allocate a new one.
     //exFAT do not support holes in the file, so new clusters need to be allocated.
     //The file system must be locked before calling.
     fn get_or_allocate_cluster(&mut self, logical: ClusterID, sync: bool) -> Result<ClusterID> {
-        let num_cluster = self.num_clusters();
-        if logical >= num_cluster {
-            self.alloc_cluster(logical - num_cluster + 1, sync)?;
+        let num_clusters = self.num_clusters();
+        if logical >= num_clusters {
+            self.start_chain
+                .extend_clusters(logical - num_clusters, sync)?;
         }
 
         self.get_physical_cluster(logical)
-    }
-
-    // If current capacity is 0(no start_cluster), this means we can choose a allocation type
-    // We first try continuous allocation
-    // If no continuous allocation available, turn to fat allocation
-    fn alloc_cluster_from_empty(
-        &mut self,
-        num_to_be_allocated: u32,
-        bitmap: &mut SpinLockGuard<'_, ExfatBitmap>,
-        sync_bitmap: bool,
-    ) -> Result<ClusterID> {
-        // search for a continuous chunk big enough
-        let search_result =
-            bitmap.find_next_free_cluster_range_fast(EXFAT_FIRST_CLUSTER, num_to_be_allocated);
-        match search_result {
-            Ok(clusters) => {
-                let allocated_start_cluster = clusters.start;
-                bitmap.set_bitmap_range_used(clusters, sync_bitmap)?;
-                self.start_chain = ExfatChain::new(
-                    self.fs.clone(),
-                    allocated_start_cluster,
-                    FatChainFlags::FAT_CHAIN_NOT_IN_USE,
-                );
-                Ok(allocated_start_cluster)
-            }
-            _ => {
-                // no continuous chunk available, use fat table
-                let allocated_start_cluster =
-                    self.alloc_cluster_fat(num_to_be_allocated, sync_bitmap, bitmap)?;
-                self.start_chain = ExfatChain::new(
-                    self.fs.clone(),
-                    allocated_start_cluster,
-                    FatChainFlags::ALLOC_POSSIBLE,
-                );
-                Ok(allocated_start_cluster)
-            }
-        }
-    }
-
-    // Append clusters at the end of file, return the first allocated cluster
-    // Caller should update size_allocated accordingly.
-    // The file system must be locked before calling.
-    fn alloc_cluster(&mut self, num_to_be_allocated: u32, sync_bitmap: bool) -> Result<ClusterID> {
-        info!("Begin to allocate {} clusters", num_to_be_allocated);
-        let fs = self.fs();
-
-        let bitmap_binding = fs.bitmap();
-        let mut bitmap = bitmap_binding.lock();
-        if num_to_be_allocated > bitmap.free_clusters() {
-            return_errno!(Errno::ENOSPC)
-        }
-
-        let num_clusters = self.num_clusters();
-        if num_clusters == 0 {
-            return self.alloc_cluster_from_empty(num_to_be_allocated, &mut bitmap, sync_bitmap);
-        }
-
-        let start_cluster = self.start_chain.cluster_id();
-
-        // Try to alloc contiguously otherwise break the chain.
-        if !self.fat_in_use() {
-            // first, check if there are enough following clusters.
-            // if not, we can give up continuous allocation and turn to fat allocation
-            let current_end = start_cluster + num_clusters;
-            let clusters = current_end..(current_end + num_to_be_allocated);
-            let check_result = bitmap.is_cluster_range_free(clusters.clone());
-            if check_result.is_ok() && check_result.unwrap() {
-                // Considering that the following clusters may be out of range, we should deal with this error here(just turn to fat allocation)
-                bitmap.set_bitmap_range_used(clusters, sync_bitmap)?;
-                return Ok(start_cluster);
-            } else {
-                // break the chain.
-                for i in 0..num_clusters - 1 {
-                    fs.write_next_fat(start_cluster + i, FatValue::Next(start_cluster + i + 1))?;
-                }
-                fs.write_next_fat(start_cluster + num_clusters - 1, FatValue::EndOfChain)?;
-                self.start_chain.set_flags(FatChainFlags::ALLOC_POSSIBLE);
-            }
-        }
-
-        //Allocate remaining clusters the tail.
-        let allocated_start_cluster =
-            self.alloc_cluster_fat(num_to_be_allocated, sync_bitmap, &mut bitmap)?;
-
-        //Insert allocated clusters to the tail.
-        let tail_cluster = self.get_physical_cluster(num_clusters - 1)?;
-        info!(
-            "Write tail for allocated cluster. tail:{}, next_allocated:{}",
-            tail_cluster, allocated_start_cluster
-        );
-        fs.write_next_fat(tail_cluster, FatValue::Next(allocated_start_cluster))?;
-
-        Ok(allocated_start_cluster)
-    }
-
-    // free physical clusters start from "start_cluster", number is "free_num", allocation mode is "flags"
-    // this function not related to specific inode
-    fn free_cluster_range(
-        &mut self,
-        physical_start_cluster: ClusterID,
-        free_num: u32,
-        sync_bitmap: bool,
-    ) -> Result<()> {
-        let fs = self.fs();
-
-        let bitmap_binding = fs.bitmap();
-        let mut bitmap = bitmap_binding.lock();
-
-        if !self.fat_in_use() {
-            bitmap.set_bitmap_range_unused(
-                physical_start_cluster..physical_start_cluster + free_num,
-                sync_bitmap,
-            )?;
-        } else {
-            self.free_cluster_fat(physical_start_cluster, free_num, sync_bitmap, &mut bitmap)?;
-        }
-        Ok(())
-    }
-
-    // free the tailing clusters in this inode, the number is free_num
-    fn free_tailing_cluster(&mut self, free_num: u32, sync_bitmap: bool) -> Result<()> {
-        let num_clusters = self.num_clusters();
-        let logical_trunc_start_cluster = num_clusters - free_num;
-
-        let physical_trunc_start_cluster =
-            self.get_physical_cluster(logical_trunc_start_cluster)?;
-
-        self.free_cluster_range(physical_trunc_start_cluster, free_num, sync_bitmap)?;
-
-        if self.fat_in_use() && logical_trunc_start_cluster != 0 {
-            let end_cluster = self.get_physical_cluster(logical_trunc_start_cluster - 1)?;
-            self.fs()
-                .write_next_fat(end_cluster, FatValue::EndOfChain)?;
-        }
-
-        Ok(())
     }
 
     pub fn resize(&mut self, new_size: usize) -> Result<()> {
@@ -609,10 +395,12 @@ impl ExfatInodeInner {
 
         match new_num_clusters.cmp(&num_clusters) {
             Ordering::Greater => {
-                self.alloc_cluster(new_num_clusters - num_clusters, sync)?;
+                self.start_chain
+                    .extend_clusters(new_num_clusters - num_clusters, sync)?;
             }
             Ordering::Less => {
-                self.free_tailing_cluster(num_clusters - new_num_clusters, sync)?;
+                self.start_chain
+                    .remove_clusters_from_tail(num_clusters - new_num_clusters, sync)?;
                 if new_size < self.size {
                     //Valid data is truncated.
                     self.size = new_size;
@@ -734,7 +522,8 @@ impl ExfatInodeInner {
         let cluster_to_be_allocated =
             (num_dentries * DENTRY_SIZE).align_up(cluster_size) / cluster_size;
 
-        self.alloc_cluster(cluster_to_be_allocated as u32, self.is_sync())?;
+        self.start_chain
+            .extend_clusters(cluster_to_be_allocated as u32, self.is_sync())?;
         self.size_allocated += cluster_size * cluster_to_be_allocated;
         self.size = self.size_allocated;
 
@@ -753,7 +542,10 @@ impl ExfatInodeInner {
 
         //Allocate new cluster if no cluster is associated.
         if !self.start_chain.is_current_cluster_valid() {
-            self.alloc_cluster(1, self.is_sync())?;
+            self.start_chain.extend_clusters(1, self.is_sync())?;
+            let cluster_size = self.fs().cluster_size();
+            self.size_allocated += cluster_size;
+            self.size = self.size_allocated;
         }
 
         //TODO: remove trailing periods of pathname.
@@ -814,7 +606,7 @@ impl ExfatInodeInner {
         let mut dir_read = 0;
         let mut current_off = offset;
 
-        //We need to skip empty or deleted dentery.
+        //We need to skip empty or deleted dentry.
         while dir_read < dir_cnt {
             let dentry_result = iter.next();
 
@@ -825,8 +617,8 @@ impl ExfatInodeInner {
             let dentry = dentry_result.unwrap()?;
 
             if let ExfatDentry::File(file) = dentry {
-                let (_, new_off) = self.read_single_dir(&file, &mut iter, current_off, visitor)?;
-                current_off = new_off;
+                let inode = self.read_single_dir(&file, &mut iter, current_off, visitor)?;
+                current_off += inode.0.read().dentry_set_size;
                 dir_read += 1;
             } else {
                 current_off += DENTRY_SIZE;
@@ -842,7 +634,7 @@ impl ExfatInodeInner {
         iter: &mut ExfatDentryIterator,
         offset: usize,
         visitor: &mut dyn DirentVisitor,
-    ) -> Result<(Arc<ExfatInode>, usize)> {
+    ) -> Result<Arc<ExfatInode>> {
         if !self.inode_type.is_directory() {
             return_errno!(Errno::ENOTDIR)
         }
@@ -870,10 +662,7 @@ impl ExfatInodeInner {
                 offset,
             )?;
 
-            Ok((
-                child_inode.clone(),
-                child_inner.dentry_entry as usize * DENTRY_SIZE + child_inner.dentry_set_size,
-            ))
+            Ok(child_inode.clone())
         } else {
             let ino = fs.alloc_inode_number();
             let child_inode = ExfatInode::read_from_iterator(
@@ -892,10 +681,7 @@ impl ExfatInodeInner {
                 child_inner.inode_type,
                 offset,
             )?;
-            Ok((
-                child_inode.clone(),
-                child_inner.dentry_entry as usize * DENTRY_SIZE + child_inner.dentry_set_size,
-            ))
+            Ok(child_inode.clone())
         }
     }
 
@@ -942,6 +728,40 @@ impl ExfatInodeInner {
         Ok(self.num_subdir == 0)
     }
 
+    fn delete_associated_secondary_clusters(&mut self, dentry: &ExfatDentry) -> Result<()> {
+        let cluster_size = self.fs().cluster_size();
+        match dentry {
+            ExfatDentry::VendorAlloc(inner) => {
+                if !self.fs().is_valid_cluster(inner.start_cluster) {
+                    return Ok(());
+                }
+                let num_to_free = (inner.size as usize / cluster_size) as u32;
+                ExfatChain::new(
+                    self.fs.clone(),
+                    inner.start_cluster,
+                    Some(num_to_free),
+                    FatChainFlags::ALLOC_POSSIBLE,
+                )?
+                .remove_clusters_from_tail(num_to_free, self.is_sync())?;
+            }
+            ExfatDentry::GenericSecondary(inner) => {
+                if !self.fs().is_valid_cluster(inner.start_cluster) {
+                    return Ok(());
+                }
+                let num_to_free = (inner.size as usize / cluster_size) as u32;
+                ExfatChain::new(
+                    self.fs.clone(),
+                    inner.start_cluster,
+                    Some(num_to_free),
+                    FatChainFlags::ALLOC_POSSIBLE,
+                )?
+                .remove_clusters_from_tail(num_to_free, self.is_sync())?;
+            }
+            _ => {}
+        };
+        Ok(())
+    }
+
     // delete dentries for cur dir
     fn delete_dentry_set(&mut self, offset: usize, len: usize) -> Result<()> {
         let mut buf = vec![0; len];
@@ -949,29 +769,12 @@ impl ExfatInodeInner {
 
         let num_dentry = len / DENTRY_SIZE;
 
-        let cluster_size = self.fs().super_block().cluster_size as usize;
+        let cluster_size = self.fs().cluster_size();
         for i in 0..num_dentry {
             let buf_offset = DENTRY_SIZE * i;
             // delete cluster chain if needed
             let dentry = ExfatDentry::try_from(&buf[buf_offset..buf_offset + DENTRY_SIZE])?;
-            match dentry {
-                ExfatDentry::VendorAlloc(inner) => {
-                    if !self.fs().is_valid_cluster(inner.start_cluster) {
-                        continue;
-                    }
-                    let num_to_free = (inner.size as usize / cluster_size) as u32;
-                    self.free_cluster_range(inner.start_cluster, num_to_free, self.is_sync())?;
-                }
-                ExfatDentry::GenericSecondary(inner) => {
-                    if !self.fs().is_valid_cluster(inner.start_cluster) {
-                        continue;
-                    }
-                    let num_to_free = (inner.size as usize / cluster_size) as u32;
-                    self.free_cluster_range(inner.start_cluster, num_to_free, self.is_sync())?;
-                }
-                _ => {}
-            }
-
+            self.delete_associated_secondary_clusters(&dentry)?;
             // mark this dentry deleted
             buf[buf_offset] &= 0x7F;
         }
