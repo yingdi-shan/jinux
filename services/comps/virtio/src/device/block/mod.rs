@@ -8,12 +8,11 @@ use pod::Pod;
 
 use crate::transport::VirtioTransport;
 
-pub const BLK_SIZE: usize = 512;
 pub static DEVICE_NAME: &str = "Virtio-Block";
 
 bitflags! {
     /// features for virtio block device
-    pub(crate) struct BlkFeatures : u64{
+    pub(crate) struct BlkFeatures : u64 {
         const BARRIER       = 1 << 0;
         const SIZE_MAX      = 1 << 1;
         const SEG_MAX       = 1 << 2;

@@ -5,6 +5,7 @@ use crate::process::posix_thread::{PosixThreadBuilder, PosixThreadExt};
 use crate::process::process_vm::ProcessVm;
 use crate::process::rlimit::ResourceLimits;
 use crate::process::signal::sig_disposition::SigDispositions;
+use crate::process::Credentials;
 use crate::thread::Thread;
 
 use super::{Pid, Process};
@@ -22,10 +23,11 @@ pub struct ProcessBuilder<'a> {
     envp: Option<Vec<CString>>,
     process_vm: Option<ProcessVm>,
     file_table: Option<Arc<Mutex<FileTable>>>,
-    fs: Option<Arc<RwLock<FsResolver>>>,
+    fs: Option<Arc<RwMutex<FsResolver>>>,
     umask: Option<Arc<RwLock<FileCreationMask>>>,
     resource_limits: Option<ResourceLimits>,
     sig_dispositions: Option<Arc<Mutex<SigDispositions>>>,
+    credentials: Option<Credentials>,
 }
 
 impl<'a> ProcessBuilder<'a> {
@@ -43,6 +45,7 @@ impl<'a> ProcessBuilder<'a> {
             umask: None,
             resource_limits: None,
             sig_dispositions: None,
+            credentials: None,
         }
     }
 
@@ -61,7 +64,7 @@ impl<'a> ProcessBuilder<'a> {
         self
     }
 
-    pub fn fs(&mut self, fs: Arc<RwLock<FsResolver>>) -> &mut Self {
+    pub fn fs(&mut self, fs: Arc<RwMutex<FsResolver>>) -> &mut Self {
         self.fs = Some(fs);
         self
     }
@@ -91,17 +94,24 @@ impl<'a> ProcessBuilder<'a> {
         self
     }
 
+    pub fn credentials(&mut self, credentials: Credentials) -> &mut Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
     fn check_build(&self) -> Result<()> {
         if self.main_thread_builder.is_some() {
             debug_assert!(self.parent.upgrade().is_some());
             debug_assert!(self.argv.is_none());
             debug_assert!(self.envp.is_none());
+            debug_assert!(self.credentials.is_none());
         }
 
         if self.main_thread_builder.is_none() {
             debug_assert!(self.parent.upgrade().is_none());
             debug_assert!(self.argv.is_some());
             debug_assert!(self.envp.is_some());
+            debug_assert!(self.credentials.is_some());
         }
 
         Ok(())
@@ -122,6 +132,7 @@ impl<'a> ProcessBuilder<'a> {
             umask,
             resource_limits,
             sig_dispositions,
+            credentials,
         } = self;
 
         let process_vm = process_vm.or_else(|| Some(ProcessVm::alloc())).unwrap();
@@ -131,7 +142,7 @@ impl<'a> ProcessBuilder<'a> {
             .unwrap();
 
         let fs = fs
-            .or_else(|| Some(Arc::new(RwLock::new(FsResolver::new()))))
+            .or_else(|| Some(Arc::new(RwMutex::new(FsResolver::new()))))
             .unwrap();
 
         let umask = umask
@@ -168,6 +179,7 @@ impl<'a> ProcessBuilder<'a> {
         } else {
             Thread::new_posix_thread_from_executable(
                 pid,
+                credentials.unwrap(),
                 process.vm(),
                 &process.fs().read(),
                 executable_path,

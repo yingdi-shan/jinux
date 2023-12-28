@@ -66,6 +66,8 @@ getrandom = { version = "0.2.10", default-features = false, features = [
 ] }
 bitvec = { version = "1.0", default-features = false, features = ["alloc"] }
 hashbrown = "0.14"
+static_assertions = "1.1.0"
+inherit-methods-macro = { git = "https://github.com/jinzhao-dev/inherit-methods-macro", rev = "98f7e3e" }
 
 [dependencies.lazy_static]
 version = "1.0"

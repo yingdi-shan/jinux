@@ -19,6 +19,8 @@
 #![feature(register_tool)]
 #![feature(trait_upcasting)]
 #![feature(format_args_nl)]
+#![feature(int_roundings)]
+#![feature(step_trait)]
 #![register_tool(component_access_control)]
 
 use crate::{
@@ -55,6 +57,7 @@ pub mod syscall;
 pub mod thread;
 pub mod time;
 mod util;
+pub(crate) mod vdso;
 pub mod vm;
 
 pub fn init() {
@@ -63,6 +66,7 @@ pub fn init() {
     sched::init();
     fs::rootfs::init(boot::initramfs()).unwrap();
     device::init().unwrap();
+    vdso::init();
 }
 
 fn init_thread() {
@@ -71,6 +75,7 @@ fn init_thread() {
         current_thread!().tid()
     );
     net::lazy_init();
+    fs::lazy_init();
     // driver::pci::virtio::block::block_device_test();
     let thread = Thread::spawn_kernel_thread(ThreadOptions::new(|| {
         println!("[kernel] Hello world from kernel!");

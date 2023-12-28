@@ -5,20 +5,17 @@ use super::rlimit::ResourceLimits;
 use super::signal::constants::SIGCHLD;
 use super::signal::sig_disposition::SigDispositions;
 use super::signal::sig_mask::SigMask;
-use super::signal::sig_queues::SigQueues;
 use super::signal::signals::Signal;
-use super::signal::{Pauser, SigEvents, SigEventsFilter};
+use super::signal::Pauser;
 use super::status::ProcessStatus;
-use super::{process_table, TermStatus};
+use super::{process_table, Credentials, TermStatus};
 use crate::device::tty::open_ntty_as_controlling_terminal;
-use crate::events::Observer;
 use crate::fs::file_table::FileTable;
 use crate::fs::fs_resolver::FsResolver;
 use crate::fs::utils::FileCreationMask;
 use crate::prelude::*;
 use crate::thread::{allocate_tid, Thread};
 use crate::vm::vmar::Vmar;
-use jinux_rights::Full;
 
 mod builder;
 mod job_control;
@@ -27,6 +24,7 @@ mod session;
 mod terminal;
 
 pub use builder::ProcessBuilder;
+use jinux_rights::Full;
 pub use job_control::JobControl;
 pub use process_group::ProcessGroup;
 pub use session::Session;
@@ -66,17 +64,15 @@ pub struct Process {
     /// File table
     file_table: Arc<Mutex<FileTable>>,
     /// FsResolver
-    fs: Arc<RwLock<FsResolver>>,
+    fs: Arc<RwMutex<FsResolver>>,
     /// umask
     umask: Arc<RwLock<FileCreationMask>>,
     /// resource limits
     resource_limits: Mutex<ResourceLimits>,
 
     // Signal
-    /// sig dispositions
+    /// Sig dispositions
     sig_dispositions: Arc<Mutex<SigDispositions>>,
-    /// Process-level signal queues
-    sig_queues: Mutex<SigQueues>,
 }
 
 impl Process {
@@ -88,17 +84,16 @@ impl Process {
         executable_path: String,
         process_vm: ProcessVm,
         file_table: Arc<Mutex<FileTable>>,
-        fs: Arc<RwLock<FsResolver>>,
+        fs: Arc<RwMutex<FsResolver>>,
         umask: Arc<RwLock<FileCreationMask>>,
         sig_dispositions: Arc<Mutex<SigDispositions>>,
         resource_limits: ResourceLimits,
     ) -> Self {
         let children_pauser = {
-            let mut sigset = SigMask::new_full();
             // SIGCHID does not interrupt pauser. Child process will
             // resume paused parent when doing exit.
-            sigset.remove_signal(SIGCHLD);
-            Pauser::new_with_sigset(sigset)
+            let sigmask = SigMask::from(SIGCHLD);
+            Pauser::new_with_mask(sigmask)
         };
 
         Self {
@@ -115,7 +110,6 @@ impl Process {
             fs,
             umask,
             sig_dispositions,
-            sig_queues: Mutex::new(SigQueues::new()),
             resource_limits: Mutex::new(resource_limits),
         }
     }
@@ -144,8 +138,11 @@ impl Process {
         let process_builder = {
             let pid = allocate_tid();
             let parent = Weak::new();
+
+            let credentials = Credentials::new_root();
+
             let mut builder = ProcessBuilder::new(pid, executable_path, parent);
-            builder.argv(argv).envp(envp);
+            builder.argv(argv).envp(envp).credentials(credentials);
             builder
         };
 
@@ -206,9 +203,21 @@ impl Process {
         &self.resource_limits
     }
 
+    fn main_thread(&self) -> Option<Arc<Thread>> {
+        self.threads
+            .lock()
+            .iter()
+            .find(|thread| thread.tid() == self.pid)
+            .cloned()
+    }
+
     // *********** Parent and child ***********
     pub fn parent(&self) -> Option<Arc<Process>> {
         self.parent.lock().upgrade()
+    }
+
+    pub fn is_init_process(&self) -> bool {
+        self.parent().is_none()
     }
 
     pub(super) fn children(&self) -> &Mutex<BTreeMap<Pid, Arc<Process>>> {
@@ -487,7 +496,7 @@ impl Process {
         &self.file_table
     }
 
-    pub fn fs(&self) -> &Arc<RwLock<FsResolver>> {
+    pub fn fs(&self) -> &Arc<RwMutex<FsResolver>> {
         &self.fs
     }
 
@@ -501,30 +510,35 @@ impl Process {
         &self.sig_dispositions
     }
 
-    pub fn has_pending_signal(&self) -> bool {
-        !self.sig_queues.lock().is_empty()
-    }
-
-    pub fn enqueue_signal(&self, signal: Box<dyn Signal>) {
-        if !self.is_zombie() {
-            self.sig_queues.lock().enqueue(signal);
+    /// Enqueues a process-directed signal. This method should only be used for enqueue kernel
+    /// signal and fault signal.
+    ///
+    /// The signal may be delivered to any one of the threads that does not currently have the
+    /// signal blocked.  If more than one of the threads has the signal unblocked, then this method
+    /// chooses an arbitrary thread to which to deliver the signal.
+    ///
+    /// TODO: restrict these method with access control tool.
+    pub fn enqueue_signal(&self, signal: impl Signal + Clone + 'static) {
+        if self.is_zombie() {
+            return;
         }
-    }
 
-    pub fn dequeue_signal(&self, mask: &SigMask) -> Option<Box<dyn Signal>> {
-        self.sig_queues.lock().dequeue(mask)
-    }
+        // TODO: check that the signal is not user signal
 
-    pub fn register_sigqueue_observer(
-        &self,
-        observer: Weak<dyn Observer<SigEvents>>,
-        filter: SigEventsFilter,
-    ) {
-        self.sig_queues.lock().register_observer(observer, filter);
-    }
+        // Enqueue signal to the first thread that does not block the signal
+        let threads = self.threads.lock();
+        for thread in threads.iter() {
+            let posix_thread = thread.as_posix_thread().unwrap();
+            if !posix_thread.has_signal_blocked(&signal) {
+                posix_thread.enqueue_signal(Box::new(signal));
+                return;
+            }
+        }
 
-    pub fn unregiser_sigqueue_observer(&self, observer: &Weak<dyn Observer<SigEvents>>) {
-        self.sig_queues.lock().unregister_observer(observer);
+        // If all threads block the signal, enqueue signal to the first thread
+        let thread = threads.iter().next().unwrap();
+        let posix_thread = thread.as_posix_thread().unwrap();
+        posix_thread.enqueue_signal(Box::new(signal));
     }
 
     // ******************* Status ********************
@@ -581,7 +595,7 @@ mod test {
             String::new(),
             ProcessVm::alloc(),
             Arc::new(Mutex::new(FileTable::new())),
-            Arc::new(RwLock::new(FsResolver::new())),
+            Arc::new(RwMutex::new(FsResolver::new())),
             Arc::new(RwLock::new(FileCreationMask::default())),
             Arc::new(Mutex::new(SigDispositions::default())),
             ResourceLimits::default(),

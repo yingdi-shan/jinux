@@ -26,11 +26,8 @@ pub struct ExfatBitmap {
 }
 
 impl ExfatBitmap {
-    pub fn load_bitmap(fs: Weak<ExfatFS>) -> Result<Self> {
-        let root_cluster = fs.upgrade().unwrap().super_block().root_dir;
-        let chain = ExfatChain::new(fs.clone(), root_cluster, FatChainFlags::ALLOC_POSSIBLE);
-
-        let dentry_iterator = ExfatDentryIterator::new(chain, 0, None)?;
+    pub fn load_bitmap(fs: Weak<ExfatFS>, root_chain: ExfatChain) -> Result<Self> {
+        let dentry_iterator = ExfatDentryIterator::new(root_chain, 0, None)?;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;
@@ -53,16 +50,20 @@ impl ExfatBitmap {
         *(self.bitvec.get(bit).unwrap())
     }
 
-    fn allocate_bitmap(fs: Weak<ExfatFS>, dentry: &ExfatBitmapDentry) -> Result<Self> {
+    fn allocate_bitmap(fs_weak: Weak<ExfatFS>, dentry: &ExfatBitmapDentry) -> Result<Self> {
+        let fs = fs_weak.upgrade().unwrap();
+        let num_clusters = (dentry.size as usize).align_up(fs.cluster_size()) / fs.cluster_size();
+
         let chain = ExfatChain::new(
-            fs.clone(),
+            fs_weak.clone(),
             dentry.start_cluster,
+            Some(num_clusters as u32),
             FatChainFlags::ALLOC_POSSIBLE,
-        );
+        )?;
         let mut buf = vec![0; dentry.size as usize];
         chain.read_at(0, &mut buf)?;
         let mut free_cluster_num = 0;
-        for idx in 0..fs.upgrade().unwrap().super_block().num_clusters - EXFAT_RESERVED_CLUSTERS {
+        for idx in 0..fs.super_block().num_clusters - EXFAT_RESERVED_CLUSTERS {
             if (buf[idx as usize / BITS_PER_BYTE] & (1 << (idx % BITS_PER_BYTE as u32))) == 0 {
                 free_cluster_num += 1;
             }
@@ -71,7 +72,7 @@ impl ExfatBitmap {
             chain,
             bitvec: BitVec::from_slice(&buf),
             free_cluster_num,
-            fs,
+            fs: fs_weak,
         })
     }
 

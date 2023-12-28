@@ -1,3 +1,5 @@
+use align_ext::AlignExt;
+
 use super::{
     constants::{UNICODE_SIZE, UPCASE_MANDATORY_SIZE},
     dentry::{ExfatDentry, ExfatDentryIterator, ExfatUpcaseDentry},
@@ -22,11 +24,8 @@ impl ExfatUpcaseTable {
         }
     }
 
-    pub fn load_upcase_table(fs: Weak<ExfatFS>) -> Result<Self> {
-        let root_cluster = fs.upgrade().unwrap().super_block().root_dir;
-        let chain = ExfatChain::new(fs.clone(), root_cluster, FatChainFlags::ALLOC_POSSIBLE);
-
-        let dentry_iterator = ExfatDentryIterator::new(chain, 0, None)?;
+    pub fn load_upcase_table(fs: Weak<ExfatFS>, root_chain: ExfatChain) -> Result<Self> {
+        let dentry_iterator = ExfatDentryIterator::new(root_chain, 0, None)?;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;
@@ -43,11 +42,15 @@ impl ExfatUpcaseTable {
             return_errno!(Errno::EINVAL)
         }
 
+        let fs = fs_weak.upgrade().unwrap();
+        let num_clusters = (dentry.size as usize).align_up(fs.cluster_size()) / fs.cluster_size();
         let chain = ExfatChain::new(
             fs_weak.clone(),
             dentry.start_cluster,
+            Some(num_clusters as u32),
             FatChainFlags::ALLOC_POSSIBLE,
-        );
+        )?;
+
         let mut buf = vec![0; dentry.size as usize];
         chain.read_at(0, &mut buf)?;
 
