@@ -1,5 +1,4 @@
 mod bitmap;
-mod block_device;
 mod constants;
 mod dentry;
 mod fat;
@@ -10,43 +9,26 @@ mod upcase_table;
 mod utils;
 
 pub use fs::ExfatFS;
+pub use fs::ExfatMountOptions;
 pub use inode::ExfatInode;
 
-static EXFAT_IMAGE: &[u8] = include_bytes!("../../../../../../exfat.img");
-
-use crate::fs::exfat::{block_device::ExfatMemoryDisk, fs::ExfatMountOptions};
 use crate::prelude::*;
-use alloc::boxed::Box;
-use jinux_frame::vm::{VmAllocOptions, VmIo, VmSegment};
 
-fn new_vm_segment_from_image() -> Result<VmSegment> {
-    let vm_segment = VmAllocOptions::new(EXFAT_IMAGE.len() / PAGE_SIZE)
-        .is_contiguous(true)
-        .alloc_contiguous()?;
+pub fn open_exfat() -> Arc<ExfatFS> {
+    component::init_all(component::parse_metadata!());
+    crate::driver::init();
+    let block_device = crate::driver::block::virtio_blk_device();
 
-    vm_segment.write_bytes(0, EXFAT_IMAGE)?;
-    Ok(vm_segment)
-}
-
-pub fn load_exfat() -> Arc<ExfatFS> {
-    let vm_segment = new_vm_segment_from_image().unwrap();
-
-    let disk = ExfatMemoryDisk::new(vm_segment);
-    let mount_option = ExfatMountOptions::default();
-
-    let fs = ExfatFS::open(Box::new(disk), mount_option);
-
-    assert!(fs.is_ok(), "Fs failed to init:{:?}", fs.unwrap_err());
-
-    fs.unwrap()
+    ExfatFS::open(block_device.clone(), ExfatMountOptions::default()).unwrap()
 }
 
 mod test {
+    const SECTOR_SIZE: usize = 512;
+
     use crate::{
         device::Random,
         fs::{
             exfat::bitmap::EXFAT_RESERVED_CLUSTERS,
-            exfat::block_device::SECTOR_SIZE,
             exfat::constants::MAX_NAME_LENGTH,
             utils::{Inode, InodeMode, InodeType},
         },
@@ -54,6 +36,8 @@ mod test {
     };
     use alloc::sync::Arc;
     use hashbrown::HashMap;
+
+    use super::open_exfat;
 
     struct FileInMemory {
         pub name: String,
@@ -343,9 +327,7 @@ mod test {
                     }
                 }
                 */
-                _ => {
-                    return;
-                }
+                _ => {}
             }
         }
     }
@@ -413,9 +395,7 @@ mod test {
                     self.contents.resize(new_size, 0);
                     self.valid_len = self.valid_len.min(new_size);
                 }
-                _ => {
-                    return;
-                }
+                _ => {}
             }
         }
     }
@@ -456,27 +436,25 @@ mod test {
         let mut random: [u8; 1] = [0];
         let _ = Random::getrandom(&mut random);
         let rand = random[0] as usize;
-        return (rand * (max + 1) / MAX_RANDOM).min(max);
+        (rand * (max + 1) / MAX_RANDOM).min(max)
     }
 
     fn random_select_from_dir_tree(root: &mut DentryInMemory) -> &mut DentryInMemory {
         let sub_cnt = root.sub_cnt();
         if sub_cnt == 0 {
-            return root;
+            root
         } else {
             let stop_get_deeper = get_random_in(1) > 0;
             if stop_get_deeper {
-                return root;
+                root
+            } else if let DentryInMemory::Dir(dir) = root {
+                let sub_idx = get_random_in(sub_cnt - 1);
+                let sub = dir.sub_dirs.get_mut(&dir.sub_names[sub_idx]);
+                let sub_dir = sub.unwrap();
+                return random_select_from_dir_tree(sub_dir);
             } else {
-                if let DentryInMemory::Dir(dir) = root {
-                    let sub_idx = get_random_in(sub_cnt - 1);
-                    let sub = dir.sub_dirs.get_mut(&dir.sub_names[sub_idx]);
-                    let sub_dir = sub.unwrap();
-                    return random_select_from_dir_tree(sub_dir);
-                } else {
-                    assert!(false, "Reached an unexpected point");
-                    todo!()
-                }
+                assert!(false, "Reached an unexpected point");
+                todo!()
             }
         }
     }
@@ -509,24 +487,24 @@ mod test {
             DentryInMemory::Dir(dir) => {
                 let op_id = get_random_in(DIR_OP_NUM - 1);
                 if op_id == CREATE_FILE_ID {
-                    return (dentry, Operation::Create(idx.to_string(), InodeType::File));
+                    (dentry, Operation::Create(idx.to_string(), InodeType::File))
                 } else if op_id == CREATE_DIR_ID {
                     return (dentry, Operation::Create(idx.to_string(), InodeType::Dir));
-                } else if op_id == UNLINK_ID && dir.sub_names.len() > 0 {
+                } else if op_id == UNLINK_ID && !dir.sub_names.is_empty() {
                     let rand_idx = get_random_in(dir.sub_names.len() - 1);
                     let name = dir.sub_names[rand_idx].clone();
                     return (dentry, Operation::Unlink(name));
-                } else if op_id == RMDIR_ID && dir.sub_names.len() > 0 {
+                } else if op_id == RMDIR_ID && !dir.sub_names.is_empty() {
                     let rand_idx = get_random_in(dir.sub_names.len() - 1);
                     let name = dir.sub_names[rand_idx].clone();
                     return (dentry, Operation::Rmdir(name));
-                } else if op_id == LOOKUP_ID && dir.sub_names.len() > 0 {
+                } else if op_id == LOOKUP_ID && !dir.sub_names.is_empty() {
                     let rand_idx = get_random_in(dir.sub_names.len() - 1);
                     let name = dir.sub_names[rand_idx].clone();
                     return (dentry, Operation::Lookup(name));
                 } else if op_id == READDIR_ID {
                     return (dentry, Operation::Readdir());
-                } else if op_id == RENAME_ID && dir.sub_names.len() > 0 {
+                } else if op_id == RENAME_ID && !dir.sub_names.is_empty() {
                     let rand_old_idx = get_random_in(dir.sub_names.len() - 1);
                     let old_name = dir.sub_names[rand_old_idx].clone();
                     let rename_to_an_exist = get_random_in(1) > 0;
@@ -570,7 +548,7 @@ mod test {
                 let op_id = get_random_in(FILE_OP_NUM - 1);
                 if op_id == READ_ID {
                     let (offset, len) = generate_random_offset_len(MAX_PAGE_PER_FILE * PAGE_SIZE);
-                    return (dentry, Operation::Read(offset, len));
+                    (dentry, Operation::Read(offset, len))
                 } else if op_id == WRITE_ID {
                     let (offset, len) = generate_random_offset_len(MAX_PAGE_PER_FILE * PAGE_SIZE);
                     return (dentry, Operation::Write(offset, len));
@@ -586,7 +564,6 @@ mod test {
         }
     }
 
-    use super::load_exfat;
     fn create_file(parent: Arc<dyn Inode>, filename: &str) -> Arc<dyn Inode> {
         let create_result = parent.create(
             filename,
@@ -621,12 +598,12 @@ mod test {
 
     #[ktest]
     fn test_new_exfat() {
-        load_exfat();
+        open_exfat();
     }
 
     #[ktest]
     fn test_create() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
 
         // test basic create
@@ -680,7 +657,7 @@ mod test {
         let mut file_names: Vec<String> = (0..100).map(|x| x.to_string().repeat(50)).collect();
         file_names.sort();
 
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
 
         for (file_id, file_name) in file_names.iter().enumerate() {
@@ -721,7 +698,7 @@ mod test {
 
     #[ktest]
     fn test_unlink_single() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let file_name = "a.txt";
         let a_inode = create_file(root.clone(), file_name);
@@ -776,7 +753,7 @@ mod test {
         let mut file_names: Vec<String> = (0..file_num).map(|x| x.to_string()).collect();
         file_names.sort();
 
-        let fs = load_exfat();
+        let fs = open_exfat();
         let cluster_size = fs.cluster_size();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let mut free_clusters_before_create: Vec<u32> = Vec::new();
@@ -823,7 +800,7 @@ mod test {
 
     #[ktest]
     fn test_rmdir() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let folder_name = "sub";
         create_folder(root.clone(), folder_name);
@@ -885,7 +862,7 @@ mod test {
 
     #[ktest]
     fn test_rename_file() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let file_name = "hi.txt";
         let a_inode = create_file(root.clone(), file_name);
@@ -990,7 +967,7 @@ mod test {
 
     #[ktest]
     fn test_rename_dir() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let old_folder_name = "old_folder";
         let old_folder = create_folder(root.clone(), old_folder_name);
@@ -1040,7 +1017,7 @@ mod test {
 
     #[ktest]
     fn test_write_and_read_file_direct() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let file = create_file(root.clone(), "test");
 
@@ -1072,7 +1049,7 @@ mod test {
 
     #[ktest]
     fn test_write_and_read_file() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let file = create_file(root.clone(), "test");
 
@@ -1104,7 +1081,7 @@ mod test {
 
     #[ktest]
     fn test_interleaved_write() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode() as Arc<dyn Inode>;
         let a = create_file(root.clone(), "a");
         let b = create_file(root.clone(), "b");
@@ -1150,7 +1127,7 @@ mod test {
 
     #[ktest]
     fn test_bitmap_modify_bit() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let bitmap_binding = fs.bitmap();
         let mut bitmap = bitmap_binding.lock();
         let total_bits_len = 1000;
@@ -1208,7 +1185,7 @@ mod test {
 
     #[ktest]
     fn test_bitmap_modify_chunk() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let bitmap_binding = fs.bitmap();
         let mut bitmap = bitmap_binding.lock();
         let total_bits_len = 1000;
@@ -1270,7 +1247,7 @@ mod test {
 
     #[ktest]
     fn test_bitmap_find() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let bitmap_binding = fs.bitmap();
         let mut bitmap = bitmap_binding.lock();
         let total_bits_len = 1000;
@@ -1323,7 +1300,7 @@ mod test {
 
     #[ktest]
     fn test_resize_single() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode();
         let f = create_file(root.clone(), "xxx");
         let cluster_size = fs.cluster_size();
@@ -1407,7 +1384,7 @@ mod test {
 
     #[ktest]
     fn test_resize_multiple() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let cluster_size = fs.cluster_size();
         let root = fs.root_inode();
         let file_num: u32 = 45;
@@ -1444,7 +1421,7 @@ mod test {
 
     #[ktest]
     fn test_resize_write() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode();
         let inode = root
             .create("xxx", InodeType::File, InodeMode::all())
@@ -1494,7 +1471,7 @@ mod test {
 
     #[ktest]
     fn test_random_sequence() {
-        let fs = load_exfat();
+        let fs = open_exfat();
         let root = fs.root_inode();
         let mut fs_in_mem = new_fs_in_memory(root);
 

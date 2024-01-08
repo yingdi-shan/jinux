@@ -5,9 +5,10 @@ use super::{
     fat::{ClusterID, ExfatChain},
     fs::ExfatFS,
 };
-use crate::{fs::exfat::fat::FatChainFlags, prelude::*};
+use crate::{fs::exfat::fat::FatChainFlags, prelude::*, vm::vmo::Vmo};
 use align_ext::AlignExt;
 use bitvec::prelude::*;
+use jinux_rights::Full;
 
 //TODO:use u64
 type BitStore = u8;
@@ -26,8 +27,12 @@ pub struct ExfatBitmap {
 }
 
 impl ExfatBitmap {
-    pub fn load_bitmap(fs: Weak<ExfatFS>, root_chain: ExfatChain) -> Result<Self> {
-        let dentry_iterator = ExfatDentryIterator::new(root_chain, 0, None)?;
+    pub fn load_bitmap(
+        fs: Weak<ExfatFS>,
+        root_page_cache: Vmo<Full>,
+        root_chain: ExfatChain,
+    ) -> Result<Self> {
+        let dentry_iterator = ExfatDentryIterator::new(root_page_cache, root_chain, 0, None)?;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;
@@ -39,7 +44,7 @@ impl ExfatBitmap {
             }
         }
 
-        return_errno_with_message!(Errno::EINVAL, "Unable to find bitmap")
+        return_errno_with_message!(Errno::EINVAL, "bitmap not found")
     }
 
     fn fs(&self) -> Arc<ExfatFS> {
@@ -61,7 +66,8 @@ impl ExfatBitmap {
             FatChainFlags::ALLOC_POSSIBLE,
         )?;
         let mut buf = vec![0; dentry.size as usize];
-        chain.read_at(0, &mut buf)?;
+
+        fs.read_meta_at(chain.physical_cluster_start_offset(), &mut buf)?;
         let mut free_cluster_num = 0;
         for idx in 0..fs.super_block().num_clusters - EXFAT_RESERVED_CLUSTERS {
             if (buf[idx as usize / BITS_PER_BYTE] & (1 << (idx % BITS_PER_BYTE as u32))) == 0 {
@@ -318,7 +324,11 @@ impl ExfatBitmap {
         let bytes: &[BitStore] = self.bitvec.as_raw_slice();
         let byte_chunk = &bytes[start_byte_off..end_byte_off];
 
-        self.chain.write_at(start_byte_off, byte_chunk)?;
+        let pos = self.chain.walk_to_cluster_at_offset(start_byte_off)?;
+
+        let phys_offset = pos.0.physical_cluster_start_offset() + pos.1;
+        self.fs().write_meta_at(phys_offset, byte_chunk)?;
+
         Ok(())
     }
 }

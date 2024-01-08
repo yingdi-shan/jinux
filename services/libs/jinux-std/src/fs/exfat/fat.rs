@@ -1,12 +1,10 @@
-use core::mem::size_of;
-use jinux_frame::vm::VmFrame;
-
 use super::{
     bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS},
     constants::EXFAT_FIRST_CLUSTER,
     fs::ExfatFS,
 };
 use crate::prelude::*;
+use core::mem::size_of;
 
 pub type ClusterID = u32;
 
@@ -195,89 +193,6 @@ impl ExfatChain {
         )
     }
 
-    //FIXME: What if cluster size is smaller than page size?
-
-    ///Offset must be inside this cluster
-    pub fn read_page(&self, offset: usize, page: &VmFrame) -> Result<()> {
-        if offset + PAGE_SIZE > self.cluster_size() {
-            return_errno_with_message!(
-                Errno::EINVAL,
-                "ExfatChain failed to read page: out of boundary."
-            )
-        }
-
-        let physical_offset = self.physical_cluster_start_offset() + offset;
-        self.fs()
-            .block_device()
-            .read_page(physical_offset / PAGE_SIZE, page)
-    }
-
-    ///Offset must be inside this cluster
-    pub fn write_page(&self, offset: usize, page: &VmFrame) -> Result<()> {
-        if offset + PAGE_SIZE > self.cluster_size() {
-            return_errno_with_message!(
-                Errno::EINVAL,
-                "ExfatChain failed to read page: out of boundary."
-            )
-        }
-
-        let physical_offset = self.physical_cluster_start_offset() + offset;
-        self.fs()
-            .block_device()
-            .write_page(physical_offset / PAGE_SIZE, page)
-    }
-
-    //FIXME: Code repetition for read_at and write_at.
-    pub fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
-        let (mut chain, mut off_in_cluster) = self.walk_to_cluster_at_offset(offset)?;
-        let mut bytes_read = 0usize;
-
-        while bytes_read < buf.len() {
-            let physical_offset = chain.physical_cluster_start_offset() + off_in_cluster;
-            let to_read_size = (buf.len() - bytes_read).min(self.cluster_size() - off_in_cluster);
-
-            let read_size = self.fs().block_device().read_at(
-                physical_offset,
-                &mut buf[bytes_read..bytes_read + to_read_size],
-            )?;
-
-            bytes_read += read_size;
-            off_in_cluster += read_size;
-
-            if off_in_cluster == self.cluster_size() {
-                chain = chain.walk(1)?;
-                off_in_cluster = 0;
-            }
-        }
-
-        Ok(bytes_read)
-    }
-    pub fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize> {
-        let (mut chain, mut off_in_cluster) = self.walk_to_cluster_at_offset(offset)?;
-        let mut bytes_written = 0usize;
-
-        while bytes_written < buf.len() {
-            let physical_offset = chain.physical_cluster_start_offset() + off_in_cluster;
-            let to_write_size =
-                (buf.len() - bytes_written).min(self.cluster_size() - off_in_cluster);
-
-            let write_size = self.fs().block_device().write_at(
-                physical_offset,
-                &buf[bytes_written..bytes_written + to_write_size],
-            )?;
-
-            bytes_written += write_size;
-            off_in_cluster += write_size;
-
-            if off_in_cluster == self.cluster_size() {
-                chain = chain.walk(1)?;
-                off_in_cluster = 0;
-            }
-        }
-
-        Ok(bytes_written)
-    }
-
     // If current capacity is 0(no start_cluster), this means we can choose a allocation type
     // We first try continuous allocation
     // If no continuous allocation available, turn to fat allocation
@@ -437,7 +352,7 @@ impl ClusterAllocator for ExfatChain {
 
         let num_clusters = self.num_clusters;
         if drop_num > num_clusters {
-            return_errno_with_message!(Errno::EINVAL, "invalid free_num.")
+            return_errno_with_message!(Errno::EINVAL, "invalid free_num")
         }
 
         let trunc_start_cluster = self.walk(num_clusters - drop_num)?.cluster_id();
