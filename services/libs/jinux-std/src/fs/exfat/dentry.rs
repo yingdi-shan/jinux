@@ -1,11 +1,12 @@
 use core::ops::Range;
 
-use align_ext::AlignExt;
-use jinux_frame::vm::{VmAllocOptions, VmFrame, VmIo};
+use jinux_frame::vm::VmIo;
+use jinux_rights::Full;
 
 use crate::fs::utils::{InodeMode, InodeType};
 use crate::prelude::*;
 use crate::time::now_as_duration;
+use crate::vm::vmo::Vmo;
 
 use super::constants::{EXFAT_FILE_NAME_LEN, MAX_NAME_LENGTH};
 use super::fat::ExfatChainPosition;
@@ -45,12 +46,6 @@ impl ExfatDentry {
             _ => &[0; DENTRY_SIZE],
         }
     }
-
-    fn read_from(pos: &ExfatChainPosition) -> Result<ExfatDentry> {
-        let mut buf = [0u8; DENTRY_SIZE];
-        pos.0.read_at(pos.1, &mut buf)?;
-        ExfatDentry::try_from(buf.as_bytes())
-    }
 }
 
 //TODO: Use enums instead of const variables.
@@ -78,7 +73,7 @@ impl TryFrom<&[u8]> for ExfatDentry {
     type Error = crate::error::Error;
     fn try_from(value: &[u8]) -> Result<Self> {
         if value.len() != DENTRY_SIZE {
-            return_errno_with_message!(Errno::EINVAL, "directory entry size mismatch.")
+            return_errno_with_message!(Errno::EINVAL, "directory entry size mismatch")
         }
         match value[0] {
             EXFAT_FILE => Ok(ExfatDentry::File(ExfatFileDentry::from_bytes(value))),
@@ -127,21 +122,21 @@ impl ExfatValidateDentryMode {
                 if matches!(dentry, ExfatDentry::File(_)) {
                     Ok(ExfatValidateDentryMode::GetFile)
                 } else {
-                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine.")
+                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine")
                 }
             }
             ExfatValidateDentryMode::GetFile => {
                 if matches!(dentry, ExfatDentry::Stream(_)) {
                     Ok(ExfatValidateDentryMode::GetStream)
                 } else {
-                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine.")
+                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine")
                 }
             }
             ExfatValidateDentryMode::GetStream => {
                 if matches!(dentry, ExfatDentry::Name(_)) {
                     Ok(ExfatValidateDentryMode::GetName(0))
                 } else {
-                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine.")
+                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine")
                 }
             }
             ExfatValidateDentryMode::GetName(count) => {
@@ -153,7 +148,7 @@ impl ExfatValidateDentryMode {
                 {
                     Ok(ExfatValidateDentryMode::GetBenignSecondary)
                 } else {
-                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine.")
+                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine")
                 }
             }
             ExfatValidateDentryMode::GetBenignSecondary => {
@@ -163,7 +158,7 @@ impl ExfatValidateDentryMode {
                 {
                     Ok(ExfatValidateDentryMode::GetBenignSecondary)
                 } else {
-                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine.")
+                    return_errno_with_message!(Errno::EINVAL, "invalid dentry state machine")
                 }
             }
         }
@@ -261,8 +256,8 @@ impl ExfatDentrySet {
         Self::new(dentries, false)
     }
 
-    pub(super) fn read_from(pos: &ExfatChainPosition) -> Result<Self> {
-        let mut iter = ExfatDentryIterator::new(pos.0.clone(), pos.1, None)?;
+    pub(super) fn read_from(page_cache: Vmo<Full>, pos: &ExfatChainPosition) -> Result<Self> {
+        let mut iter = ExfatDentryIterator::new(page_cache, pos.0.clone(), pos.1, None)?;
         let primary_dentry_result = iter.next();
 
         if primary_dentry_result.is_none() {
@@ -299,16 +294,11 @@ impl ExfatDentrySet {
         Self::new(dentries, true)
     }
 
-    pub(super) fn write_at(&self, pos: &ExfatChainPosition) -> Result<usize> {
-        let bytes = self.to_le_bytes();
-        pos.0.write_at(pos.1, &bytes)
-    }
-
     pub(super) fn len(&self) -> usize {
         self.dentries.len()
     }
 
-    fn to_le_bytes(&self) -> Vec<u8> {
+    pub(super) fn to_le_bytes(&self) -> Vec<u8> {
         // It may be slow to copy at the granularity of byte.
         //self.dentries.iter().map(|dentry| dentry.to_le_bytes()).flatten().collect::<Vec<u8>>()
 
@@ -433,17 +423,18 @@ pub struct ExfatDentryIterator {
     ///The dentry position in current cluster.
     entry: u32,
     ///Used to hold cached dentries
-    buffer: VmFrame,
-
+    page_cache: Vmo<Full>,
     ///Remaining size that can be iterated. If none, iterate through the whole cluster chain.
     size: Option<usize>,
-
-    previous_error: Option<Error>,
-    read_eof: bool,
 }
 
 impl ExfatDentryIterator {
-    pub fn new(chain: ExfatChain, offset: usize, size: Option<usize>) -> Result<Self> {
+    pub fn new(
+        page_cache: Vmo<Full>,
+        chain: ExfatChain,
+        offset: usize,
+        size: Option<usize>,
+    ) -> Result<Self> {
         if size.is_some() && size.unwrap() % DENTRY_SIZE != 0 {
             return_errno_with_message!(Errno::EINVAL, "remaining size unaligned to dentry size")
         }
@@ -454,40 +445,16 @@ impl ExfatDentryIterator {
 
         let (chain, offset) = chain.walk_to_cluster_at_offset(offset)?;
 
-        let buffer = VmAllocOptions::new(1).uninit(true).alloc_single().unwrap();
-        if chain.is_current_cluster_valid() {
-            chain.read_page(offset.align_down(PAGE_SIZE), &buffer)?;
-        }
-
         Ok(Self {
             chain,
             entry: (offset / DENTRY_SIZE) as u32,
-            buffer,
+            page_cache,
             size,
-            previous_error: None,
-            read_eof: false,
         })
     }
 
     pub fn chain_and_offset(&self) -> ExfatChainPosition {
         (self.chain.clone(), self.entry as usize * DENTRY_SIZE)
-    }
-
-    fn read_next_page(&mut self) -> Result<()> {
-        if self.entry as usize * DENTRY_SIZE == self.chain.cluster_size() {
-            let chain = self.chain.walk(1);
-            if chain.is_err() {
-                self.read_eof = true;
-                return Err(chain.unwrap_err());
-            }
-            self.chain = chain.unwrap();
-            self.entry = 0;
-        }
-        self.chain.read_page(
-            (self.entry as usize * DENTRY_SIZE).align_down(PAGE_SIZE),
-            &self.buffer,
-        )?;
-        Ok(())
     }
 }
 
@@ -495,14 +462,6 @@ impl Iterator for ExfatDentryIterator {
     type Item = Result<ExfatDentry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.previous_error.is_some() {
-            if self.read_eof {
-                return None;
-            }
-            let result = self.previous_error.clone().unwrap();
-            return Some(Err(result));
-        }
-
         if !self.chain.is_current_cluster_valid() {
             return None;
         }
@@ -511,35 +470,27 @@ impl Iterator for ExfatDentryIterator {
             return None;
         }
 
-        let byte_start = self.entry as usize * DENTRY_SIZE % PAGE_SIZE;
+        let byte_start = self.entry as usize * DENTRY_SIZE;
         let mut dentry_buf = [0u8; DENTRY_SIZE];
 
-        //There will be no errors for reading from page.
-        //TODO: is the bytes copy neccessary?
-        self.buffer.read_bytes(byte_start, &mut dentry_buf).unwrap();
+        let read_result = self.page_cache.read_bytes(byte_start, &mut dentry_buf);
 
-        let dentry_result = ExfatDentry::try_from(dentry_buf.as_bytes());
-
-        if let Err(e) = dentry_result {
-            return Some(Err(e));
+        if let Err(e) = read_result {
+            return Some(Err(Error::with_message(
+                Errno::EIO,
+                "Unable to read dentry from page cache.",
+            )));
         }
+
+        //The result is always OK.
+        let dentry_result = ExfatDentry::try_from(dentry_buf.as_bytes()).unwrap();
 
         self.entry += 1;
         if self.size.is_some() {
             self.size = Some(self.size.unwrap() - DENTRY_SIZE);
         }
 
-        //Read next page if we reach the page boundary
-        if (self.size.is_none() || self.size.unwrap() != 0)
-            && (self.entry as usize * DENTRY_SIZE % PAGE_SIZE == 0)
-        {
-            let load_page_result = self.read_next_page();
-            if load_page_result.is_err() {
-                self.previous_error = Some(load_page_result.unwrap_err());
-            }
-        }
-
-        Some(Ok(dentry_result.unwrap()))
+        Some(Ok(dentry_result))
     }
 }
 

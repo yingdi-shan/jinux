@@ -174,9 +174,9 @@ fn main() {
         qemu_cmd.args(qemu_grub_efi::NOIOMMU_DEVICE_ARGS);
     }
 
-    let ext2_image = get_ext2_image(&PathBuf::from("regression/build/ext2.img"));
+    let exfat_img = get_image(&PathBuf::from("regression/build/exfat.img"));
     qemu_cmd.arg("-drive");
-    qemu_cmd.arg(ext2_image);
+    qemu_cmd.arg(exfat_img);
 
     if args.boot_method == BootMethod::Microvm {
         let image = microvm::create_bootdev_image(args.path);
@@ -220,9 +220,9 @@ fn main() {
     }
 }
 
-pub fn get_ext2_image(path: &Path) -> String {
+pub fn get_image(path: &Path) -> String {
     if !path.exists() {
-        panic!("can not find the ext2 image")
+        panic!("can not find the image")
     }
 
     format!("file={},if=none,format=raw,id=x0", path.to_string_lossy())

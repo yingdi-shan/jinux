@@ -1,24 +1,22 @@
+use crate::prelude::*;
 use core::{num::NonZeroUsize, ops::Range, sync::atomic::AtomicUsize};
 
 use super::{
     bitmap::{ExfatBitmap, EXFAT_RESERVED_CLUSTERS},
-    block_device::BlockDevice,
     fat::{ClusterID, ExfatChain, FatChainFlags, FatValue, FAT_ENTRY_SIZE},
     inode::ExfatInode,
     super_block::ExfatSuperBlock,
     upcase_table::ExfatUpcaseTable,
 };
 
-use crate::{
-    fs::{
-        exfat::{constants::*, inode::Ino},
-        utils::SuperBlock,
-        utils::{FileSystem, Inode},
-    },
-    prelude::*,
-    return_errno_with_message,
+use jinux_block::{id::BlockId, BlockDevice};
+use jinux_frame::vm::VmFrame;
+
+use crate::fs::{
+    exfat::{constants::*, inode::Ino},
+    utils::{FileSystem, Inode, PageCacheBackend},
+    utils::{PageCache, SuperBlock},
 };
-use alloc::boxed::Box;
 use lru::LruCache;
 
 use super::super_block::ExfatBootSector;
@@ -30,7 +28,7 @@ use hashbrown::HashMap;
 
 #[derive(Debug)]
 pub struct ExfatFS {
-    block_device: Box<dyn BlockDevice>,
+    block_device: Arc<dyn BlockDevice>,
     super_block: ExfatSuperBlock,
 
     bitmap: Arc<SpinLock<ExfatBitmap>>,
@@ -46,9 +44,10 @@ pub struct ExfatFS {
 
     //Cache for fat table
     fat_cache: RwLock<LruCache<ClusterID, ClusterID>>,
+    meta_cache: PageCache,
 
     //A global lock, We need to hold the mutex before accessing bitmap or inode, otherwise there will be deadlocks.
-    mutex: SpinLock<()>,
+    mutex: Mutex<()>,
 }
 
 const LRU_CACHE_SIZE: usize = 1024;
@@ -57,13 +56,13 @@ pub const EXFAT_ROOT_INO: Ino = 1;
 
 impl ExfatFS {
     pub fn open(
-        block_device: Box<dyn BlockDevice>,
+        block_device: Arc<dyn BlockDevice>,
         mount_option: ExfatMountOptions,
     ) -> Result<Arc<Self>> {
         //Load the super_block
         let super_block = Self::read_super_block(block_device.as_ref())?;
-
-        let exfat_fs = Arc::new(ExfatFS {
+        let fs_size = super_block.num_clusters as usize * super_block.cluster_size as usize;
+        let exfat_fs = Arc::new_cyclic(|weak_self| ExfatFS {
             block_device,
             super_block,
             bitmap: Arc::new(SpinLock::new(ExfatBitmap::default())),
@@ -74,7 +73,8 @@ impl ExfatFS {
             fat_cache: RwLock::new(LruCache::<ClusterID, ClusterID>::new(
                 NonZeroUsize::new(LRU_CACHE_SIZE).unwrap(),
             )),
-            mutex: SpinLock::new(()),
+            meta_cache: PageCache::with_capacity(fs_size, weak_self.clone() as _).unwrap(),
+            mutex: Mutex::new(()),
         });
 
         // TODO: if the main superblock is corrupted, should we load the backup?
@@ -91,10 +91,19 @@ impl ExfatFS {
             FatChainFlags::ALLOC_POSSIBLE,
         )?;
 
-        let upcase_table =
-            ExfatUpcaseTable::load_upcase_table(weak_fs.clone(), root_chain.clone())?;
-        let bitmap = ExfatBitmap::load_bitmap(weak_fs.clone(), root_chain.clone())?;
-        let root = ExfatInode::build_root_inode(weak_fs, root_chain)?;
+        let root = ExfatInode::build_root_inode(weak_fs.clone(), root_chain.clone())?;
+
+        let upcase_table = ExfatUpcaseTable::load_upcase_table(
+            weak_fs.clone(),
+            root.page_cache().unwrap(),
+            root_chain.clone(),
+        )?;
+
+        let bitmap = ExfatBitmap::load_bitmap(
+            weak_fs.clone(),
+            root.page_cache().unwrap(),
+            root_chain.clone(),
+        )?;
 
         *exfat_fs.bitmap.lock() = bitmap;
         *exfat_fs.upcase_table.lock() = upcase_table;
@@ -121,16 +130,28 @@ impl ExfatFS {
         let _ = self.inodes.write().remove(&hash);
     }
 
-    pub fn insert_inode(&self, inode: Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {
+    pub(super) fn insert_inode(&self, inode: Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {
         self.inodes.write().insert(inode.hash_index(), inode)
     }
 
-    pub fn read_next_fat(&self, cluster: ClusterID) -> Result<FatValue> {
-        let mut cache_inner = self.fat_cache.write();
+    pub(super) fn write_meta_at(&self, offset: usize, buf: &[u8]) -> Result<()> {
+        self.meta_cache.pages().write_bytes(offset, buf)?;
+        Ok(())
+    }
 
-        let cache = cache_inner.get(&cluster);
-        if let Some(&value) = cache {
-            return Ok(FatValue::from(value));
+    pub(super) fn read_meta_at(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
+        self.meta_cache.pages().read_bytes(offset, buf)?;
+        Ok(())
+    }
+
+    pub fn read_next_fat(&self, cluster: ClusterID) -> Result<FatValue> {
+        {
+            let mut cache_inner = self.fat_cache.write();
+
+            let cache = cache_inner.get(&cluster);
+            if let Some(&value) = cache {
+                return Ok(FatValue::from(value));
+            }
         }
 
         let sb: ExfatSuperBlock = self.super_block();
@@ -143,10 +164,10 @@ impl ExfatFS {
         let position =
             sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
         let mut buf: [u8; FAT_ENTRY_SIZE] = [0; FAT_ENTRY_SIZE];
-        self.block_device().read_at(position as usize, &mut buf)?;
+        self.read_meta_at(position as usize, &mut buf)?;
 
         let value = u32::from_le_bytes(buf);
-        cache_inner.put(cluster, value);
+        self.fat_cache.write().put(cluster, value);
 
         Ok(FatValue::from(value))
     }
@@ -160,18 +181,15 @@ impl ExfatFS {
         let position =
             sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
 
-        self.block_device()
-            .write_at(position as usize, &raw_value.to_le_bytes())?;
+        self.write_meta_at(position as usize, &raw_value.to_le_bytes())?;
 
         if sb.fat1_start_sector != sb.fat2_start_sector {
             let mirror_position = sb.fat2_start_sector * sector_size as u64
                 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
-            self.block_device()
-                .write_at(mirror_position as usize, &raw_value.to_le_bytes())?;
+            self.write_meta_at(mirror_position as usize, &raw_value.to_le_bytes())?;
         }
 
-        let mut cache_inner = self.fat_cache.write();
-        cache_inner.put(cluster, raw_value);
+        self.fat_cache.write().put(cluster, raw_value);
 
         Ok(())
     }
@@ -272,7 +290,11 @@ impl ExfatFS {
         self.super_block.sector_size as usize
     }
 
-    pub(super) fn lock(&self) -> SpinLockGuard<'_, ()> {
+    pub fn fs_size(&self) -> usize {
+        self.super_block.cluster_size as usize * self.super_block.num_clusters as usize
+    }
+
+    pub(super) fn lock(&self) -> MutexGuard<'_, ()> {
         self.mutex.lock()
     }
 
@@ -307,11 +329,37 @@ impl ExfatFS {
     }
 }
 
+impl PageCacheBackend for ExfatFS {
+    fn read_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
+        if self.fs_size() < idx * PAGE_SIZE {
+            return_errno_with_message!(Errno::EINVAL, "invalid read size")
+        }
+        self.block_device
+            .read_block_sync(BlockId::new(idx as u64), frame)?;
+        Ok(())
+    }
+
+    //What if block_size is not equal to page size?
+    fn write_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
+        if self.fs_size() < idx * PAGE_SIZE {
+            return_errno_with_message!(Errno::EINVAL, "invalid write size")
+        }
+        self.block_device
+            .write_block_sync(BlockId::new(idx as u64), frame)?;
+        Ok(())
+    }
+
+    fn num_pages(&self) -> usize {
+        self.fs_size() / PAGE_SIZE
+    }
+}
+
 impl FileSystem for ExfatFS {
     fn sync(&self) -> Result<()> {
         for inode in self.inodes.read().values() {
             inode.sync()?;
         }
+        self.meta_cache.evict_range(0..self.fs_size())?;
         Ok(())
     }
 

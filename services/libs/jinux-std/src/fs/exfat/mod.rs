@@ -1,5 +1,4 @@
 mod bitmap;
-mod block_device;
 mod constants;
 mod dentry;
 mod fat;
@@ -10,15 +9,95 @@ mod upcase_table;
 mod utils;
 
 pub use fs::ExfatFS;
+pub use fs::ExfatMountOptions;
 pub use inode::ExfatInode;
 
+/// Exfat disk image
 static EXFAT_IMAGE: &[u8] = include_bytes!("../../../../../../exfat.img");
 
-use crate::fs::exfat::{block_device::ExfatMemoryDisk, fs::ExfatMountOptions};
 use crate::prelude::*;
-use alloc::boxed::Box;
+use alloc::fmt::Debug;
+use jinux_block::bio::{BioEnqueueError, BioStatus, BioType, SubmitBio};
+use jinux_block::{request_queue::BioRequestQueue, BlockDevice};
 use jinux_frame::vm::{VmAllocOptions, VmIo, VmSegment};
 
+/// Followings are implementations of memory simulated block device
+pub const SECTOR_SIZE: usize = 512;
+struct ExfatMemoryBioQueue(VmSegment);
+
+impl ExfatMemoryBioQueue {
+    pub fn new(segment: VmSegment) -> Self {
+        ExfatMemoryBioQueue(segment)
+    }
+
+    pub fn sectors_count(&self) -> usize {
+        self.0.nframes() * (PAGE_SIZE / SECTOR_SIZE)
+    }
+}
+
+impl BioRequestQueue for ExfatMemoryBioQueue {
+    fn enqueue(&self, bio: SubmitBio) -> core::prelude::v1::Result<(), BioEnqueueError> {
+        let start_device_ofs = bio.sid_range().start.to_raw() as usize * SECTOR_SIZE;
+        let mut cur_device_ofs = start_device_ofs;
+        for seg in bio.segments() {
+            let size = match bio.type_() {
+                BioType::Read => seg
+                    .writer()
+                    .write(&mut self.0.reader().skip(cur_device_ofs)),
+                BioType::Write => self
+                    .0
+                    .writer()
+                    .skip(cur_device_ofs)
+                    .write(&mut seg.reader()),
+                _ => 0,
+            };
+            cur_device_ofs += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn dequeue(&self) -> jinux_block::request_queue::BioRequest {
+        todo!()
+    }
+}
+
+pub struct ExfatMemoryDisk {
+    queue: ExfatMemoryBioQueue,
+}
+
+impl ExfatMemoryDisk {
+    pub fn new(segment: VmSegment) -> Self {
+        ExfatMemoryDisk {
+            //segment: segment,
+            queue: ExfatMemoryBioQueue::new(segment),
+        }
+    }
+
+    pub fn sectors_count(&self) -> usize {
+        self.queue.sectors_count()
+    }
+}
+
+impl Debug for ExfatMemoryDisk {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.debug_struct("ExfatMemoryDisk")
+            .field("blocks_count", &self.sectors_count())
+            .finish()
+    }
+}
+
+impl BlockDevice for ExfatMemoryDisk {
+    fn request_queue(&self) -> &dyn jinux_block::request_queue::BioRequestQueue {
+        &self.queue
+    }
+
+    fn handle_irq(&self) {
+        error!("ExfatMemoryDisk handle irq");
+    }
+}
+
+/// Read exfat disk image
 fn new_vm_segment_from_image() -> Result<VmSegment> {
     let vm_segment = VmAllocOptions::new(EXFAT_IMAGE.len() / PAGE_SIZE)
         .is_contiguous(true)
@@ -28,25 +107,31 @@ fn new_vm_segment_from_image() -> Result<VmSegment> {
     Ok(vm_segment)
 }
 
+// Generate a simulated exfat file system
 pub fn load_exfat() -> Arc<ExfatFS> {
     let vm_segment = new_vm_segment_from_image().unwrap();
-
     let disk = ExfatMemoryDisk::new(vm_segment);
     let mount_option = ExfatMountOptions::default();
-
-    let fs = ExfatFS::open(Box::new(disk), mount_option);
-
+    let fs = ExfatFS::open(Arc::new(disk), mount_option);
     assert!(fs.is_ok(), "Fs failed to init:{:?}", fs.unwrap_err());
-
     fs.unwrap()
 }
 
+// pub fn open_exfat() -> Arc<ExfatFS> {
+//     component::init_all(component::parse_metadata!());
+//     crate::driver::init();
+//     let block_device = crate::driver::block::virtio_blk_device();
+
+//     ExfatFS::open(block_device.clone(), ExfatMountOptions::default()).unwrap()
+// }
+
 mod test {
+    const SECTOR_SIZE: usize = 512;
+
     use crate::{
         device::Random,
         fs::{
             exfat::bitmap::EXFAT_RESERVED_CLUSTERS,
-            exfat::block_device::SECTOR_SIZE,
             exfat::constants::MAX_NAME_LENGTH,
             utils::{generate_random_operation, new_fs_in_memory},
             utils::{Inode, InodeMode, InodeType},
@@ -171,7 +256,8 @@ mod test {
             for i in 0..sub_inodes.len() {
                 assert!(
                     sub_inodes[i].cmp(&file_names[i]).is_eq(),
-                    "Readdir Result:{:?} Filenames:{:?}",
+                    "i:{:?} Readdir Result:{:?} Filenames:{:?}",
+                    i,
                     sub_inodes[i],
                     file_names[i]
                 )
@@ -512,7 +598,8 @@ mod test {
         let root = fs.root_inode() as Arc<dyn Inode>;
         let file = create_file(root.clone(), "test");
 
-        const BUF_SIZE: usize = PAGE_SIZE * 7 + 3 * SECTOR_SIZE;
+        // const BUF_SIZE: usize = PAGE_SIZE * 7 + 3 * SECTOR_SIZE;
+        const BUF_SIZE: usize = PAGE_SIZE * 7;
 
         let mut buf = vec![0u8; BUF_SIZE];
         for (i, num) in buf.iter_mut().enumerate() {

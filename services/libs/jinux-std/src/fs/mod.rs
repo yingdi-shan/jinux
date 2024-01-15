@@ -13,7 +13,8 @@ pub mod ramfs;
 pub mod rootfs;
 pub mod utils;
 
-use crate::fs::{ext2::Ext2, fs_resolver::FsPath};
+use crate::fs::exfat::{ExfatFS, ExfatMountOptions};
+use crate::fs::fs_resolver::FsPath;
 use crate::prelude::*;
 use crate::thread::kernel_thread::KernelThreadExt;
 use jinux_virtio::device::block::device::BlockDevice as VirtIoBlkDevice;
@@ -31,8 +32,17 @@ pub fn lazy_init() {
     };
     crate::Thread::spawn_kernel_thread(crate::ThreadOptions::new(task_fn));
 
-    let ext2_fs = Ext2::open(cloned_block_device).unwrap();
-    let target_path = FsPath::try_from("/ext2").unwrap();
-    println!("[kernel] Mount Ext2 fs at {:?} ", target_path);
-    self::rootfs::mount_fs_at(ext2_fs, &target_path).unwrap();
+    let exfat_fs = ExfatFS::open(cloned_block_device, ExfatMountOptions::default());
+    if exfat_fs.is_err() {
+        error!("{:?}", exfat_fs.unwrap_err())
+    } else {
+        let target_path = FsPath::try_from("/exfat").unwrap();
+        println!("[kernel] Mount Exfat fs at {:?} ", target_path);
+        self::rootfs::mount_fs_at(exfat_fs.unwrap(), &target_path).unwrap();
+    }
+
+    // let ext2_fs = Ext2::open(cloned_block_device).unwrap();
+    // let target_path = FsPath::try_from("/ext2").unwrap();
+    // println!("[kernel] Mount Ext2 fs at {:?} ", target_path);
+    // self::rootfs::mount_fs_at(ext2_fs, &target_path).unwrap();
 }

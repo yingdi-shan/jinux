@@ -1,4 +1,5 @@
 use align_ext::AlignExt;
+use jinux_rights::Full;
 
 use super::{
     constants::{UNICODE_SIZE, UPCASE_MANDATORY_SIZE},
@@ -7,7 +8,7 @@ use super::{
     fs::ExfatFS,
     utils::calc_checksum_32,
 };
-use crate::{fs::exfat::fat::FatChainFlags, prelude::*};
+use crate::{fs::exfat::fat::FatChainFlags, prelude::*, vm::vmo::Vmo};
 
 #[derive(Debug)]
 pub struct ExfatUpcaseTable {
@@ -24,8 +25,12 @@ impl ExfatUpcaseTable {
         }
     }
 
-    pub fn load_upcase_table(fs: Weak<ExfatFS>, root_chain: ExfatChain) -> Result<Self> {
-        let dentry_iterator = ExfatDentryIterator::new(root_chain, 0, None)?;
+    pub fn load_upcase_table(
+        fs: Weak<ExfatFS>,
+        root_page_cache: Vmo<Full>,
+        root_chain: ExfatChain,
+    ) -> Result<Self> {
+        let dentry_iterator = ExfatDentryIterator::new(root_page_cache, root_chain, 0, None)?;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;
@@ -34,12 +39,12 @@ impl ExfatUpcaseTable {
             }
         }
 
-        return_errno!(Errno::EINVAL)
+        return_errno_with_message!(Errno::EINVAL, "Upcase table not found")
     }
 
     fn allocate_table(fs_weak: Weak<ExfatFS>, dentry: &ExfatUpcaseDentry) -> Result<Self> {
         if (dentry.size as usize) < UPCASE_MANDATORY_SIZE * UNICODE_SIZE {
-            return_errno!(Errno::EINVAL)
+            return_errno_with_message!(Errno::EINVAL, "Upcase table too small")
         }
 
         let fs = fs_weak.upgrade().unwrap();
@@ -52,7 +57,7 @@ impl ExfatUpcaseTable {
         )?;
 
         let mut buf = vec![0; dentry.size as usize];
-        chain.read_at(0, &mut buf)?;
+        fs.read_meta_at(chain.physical_cluster_start_offset(), &mut buf)?;
 
         if dentry.checksum != calc_checksum_32(&buf) {
             return_errno_with_message!(Errno::EINVAL, "invalid checksum")
