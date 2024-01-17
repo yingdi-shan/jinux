@@ -1,8 +1,8 @@
-//! jinux-runner is the Jinux runner script to ease the pain of running
-//! and testing Jinux inside a QEMU VM. It should be built and run as the
+//! aster-runner is the Asterinas runner script to ease the pain of running
+//! and testing Asterinas inside a QEMU VM. It should be built and run as the
 //! cargo runner: https://doc.rust-lang.org/cargo/reference/config.html
 //!
-//! The runner will generate the filesystem image for starting Jinux. If
+//! The runner will generate the filesystem image for starting Asterinas. If
 //! we should use the runner in the default mode, which invokes QEMU with
 //! a GRUB boot device image, the runner would be responsible for generating
 //! the appropriate kernel image and the boot device image. It also supports
@@ -14,7 +14,6 @@ pub mod gdb;
 pub mod machine;
 
 use std::{
-    fs::OpenOptions,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -33,14 +32,15 @@ enum BootMethod {
 pub enum BootProtocol {
     Multiboot,
     Multiboot2,
-    Linux,
+    LinuxLegacy32,
+    LinuxEfiHandover64,
 }
 /// The CLI of this runner.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     // Positional arguments.
-    /// The Jinux binary path.
+    /// The Asterinas binary path.
     path: PathBuf,
 
     /// Provide the kernel commandline, which specifies
@@ -57,7 +57,8 @@ struct Args {
     /// Boot protocol. Can be one of the following items:
     ///  - `multiboot`;
     ///  - `multiboot2`;
-    ///  - `linux`.
+    ///  - `linux-legacy32`;
+    ///  - `linux-efi-handover64`.
     #[arg(long, value_enum, default_value_t = BootProtocol::Multiboot2)]
     boot_protocol: BootProtocol,
 
@@ -80,10 +81,6 @@ struct Args {
     /// Run a GDB client instead of running the kernel.
     #[arg(long, default_value_t = false)]
     run_gdb_client: bool,
-
-    /// Run in the release mode.
-    #[arg(long, default_value_t = false)]
-    release_mode: bool,
 }
 
 pub const COMMON_ARGS: &[&str] = &[
@@ -117,7 +114,7 @@ pub fn random_hostfwd_ports() -> (u16, u16) {
 
 pub const GDB_ARGS: &[&str] = &[
     "-chardev",
-    "socket,path=/tmp/jinux-gdb-socket,server=on,wait=off,id=gdb0",
+    "socket,path=/tmp/aster-gdb-socket,server=on,wait=off,id=gdb0",
     "-gdb",
     "chardev:gdb0",
     "-S",
@@ -145,13 +142,13 @@ fn main() {
         port1, port2
     ));
     println!(
-        "[jinux-runner] Binding host ports to guest ports: ({} -> {}); ({} -> {}).",
+        "[aster-runner] Binding host ports to guest ports: ({} -> {}); ({} -> {}).",
         port1, 22, port2, 8080
     );
 
     if args.halt_for_gdb {
         if args.enable_kvm {
-            println!("[jinux-runner] Can't enable KVM when running QEMU as a GDB server. Abort.");
+            println!("[aster-runner] Can't enable KVM when running QEMU as a GDB server. Abort.");
             return;
         }
         qemu_cmd.args(GDB_ARGS);
@@ -175,9 +172,11 @@ fn main() {
         qemu_cmd.args(qemu_grub_efi::NOIOMMU_DEVICE_ARGS);
     }
 
-    let fs_image = create_fs_image(args.path.as_path());
+    // TODO: Add arguments to the runner CLI tool so that the user can specify
+    //       a list of disk drives, each of which may be in a different FS format.
+    let ext2_image = get_fs_image(&PathBuf::from("regression/build/ext2.img"), 0);
     qemu_cmd.arg("-drive");
-    qemu_cmd.arg(fs_image);
+    qemu_cmd.arg(ext2_image);
 
     if args.boot_method == BootMethod::Microvm {
         let image = microvm::create_bootdev_image(args.path);
@@ -200,13 +199,12 @@ fn main() {
             initramfs_path,
             grub_cfg,
             args.boot_protocol,
-            args.release_mode,
         );
         qemu_cmd.arg("-cdrom");
         qemu_cmd.arg(bootdev_image.as_os_str());
     }
 
-    println!("[jinux-runner] Running: {:#?}", qemu_cmd);
+    println!("[aster-runner] Running: {:#?}", qemu_cmd);
 
     let exit_status = qemu_cmd.status().unwrap();
     if !exit_status.success() {
@@ -214,27 +212,21 @@ fn main() {
         let qemu_exit_code = exit_status.code().unwrap();
         let kernel_exit_code = qemu_exit_code >> 1;
         match kernel_exit_code {
-            0x10 /*jinux_frame::QemuExitCode::Success*/ => { std::process::exit(0); },
-            0x20 /*jinux_frame::QemuExitCode::Failed*/ => { std::process::exit(1); },
-            _ => { std::process::exit(qemu_exit_code) },
+            0x10 /*aster_frame::QemuExitCode::Success*/ => { std::process::exit(0); },
+            0x20 /*aster_frame::QemuExitCode::Failed*/ => { std::process::exit(1); },
+            _ /* unknown, e.g., a triple fault */ => { std::process::exit(2) },
         }
     }
 }
 
-pub fn create_fs_image(path: &Path) -> String {
-    let mut fs_img_path = path.parent().unwrap().to_str().unwrap().to_string();
-    fs_img_path.push_str("/fs.img");
-    let path = Path::new(fs_img_path.as_str());
-    if path.exists() {
-        return format!("file={},if=none,format=raw,id=x0", fs_img_path.as_str());
+pub fn get_fs_image(path: &Path, drive_id: u32) -> String {
+    if !path.exists() {
+        panic!("can not find the fs image")
     }
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(fs_img_path.as_str())
-        .unwrap();
-    // 32MiB
-    f.set_len(64 * 1024 * 1024).unwrap();
-    format!("file={},if=none,format=raw,id=x0", fs_img_path.as_str())
+
+    format!(
+        "file={},if=none,format=raw,id=x{}",
+        path.to_string_lossy(),
+        drive_id
+    )
 }

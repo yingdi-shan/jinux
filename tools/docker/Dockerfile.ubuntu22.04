@@ -14,6 +14,44 @@ RUN apt update && apt-get install -y --no-install-recommends \
     wget \
     gnupg
 
+#= Build benchmark =========================================================
+FROM build-base as build-benchmarks
+
+# Download the source files of benchmarks
+WORKDIR /root
+RUN apt install -y automake \
+    libtool \
+    pkg-config
+RUN wget https://github.com/akopytov/sysbench/archive/1.0.20.tar.gz \
+    && tar -zxvf 1.0.20.tar.gz \
+    && rm 1.0.20.tar.gz
+RUN git clone https://github.com/nicktehrany/membench.git
+RUN git clone https://github.com/esnet/iperf.git
+
+# Build sysbench
+WORKDIR /root/sysbench-1.0.20
+RUN ./autogen.sh \
+    && ./configure --without-mysql --prefix=/usr/local/benchmark/sysbench \
+    && make -j \
+    && make install
+
+# Build membench
+WORKDIR /root/membench
+RUN make -j \ 
+    && mkdir /usr/local/benchmark/membench \
+    && cp membench /usr/local/benchmark/membench/
+
+# Build iperf
+WORKDIR /root/iperf
+RUN ./configure --prefix=/usr/local/benchmark/iperf \
+    && make -j \
+    && make install
+ 
+WORKDIR /root
+RUN rm -rf sysbench-1.0.20 \
+    membench \
+    iperf
+
 #= Build syscall test =========================================================
 
 FROM build-base as build-bazel
@@ -83,7 +121,7 @@ FROM build-ovmf as ovmf
 
 # Fetch and build OVMF from the EDK2 official source
 WORKDIR /root
-RUN git clone --depth 1 --branch edk2-stable202308 --recurse-submodules --shallow-submodules https://github.com/tianocore/edk2.git
+RUN git clone --depth 1 --branch edk2-stable202311 --recurse-submodules --shallow-submodules https://github.com/tianocore/edk2.git
 WORKDIR /root/edk2
 RUN source ./edksetup.sh \
     && make -C BaseTools \
@@ -144,15 +182,15 @@ RUN make defconfig \
     && sed -i "s/# CONFIG_FEATURE_SH_STANDALONE is not set/CONFIG_FEATURE_SH_STANDALONE=y/g" .config \
     && make -j
 
-#= The final stages to produce the Jinux development image ====================
+#= The final stages to produce the Asterinas development image ====================
 
 FROM build-base as rust
 
 # Install Rust
 ENV PATH="/root/.cargo/bin:${PATH}"
-ARG JINUX_RUST_VERSION
+ARG ASTER_RUST_VERSION
 RUN curl https://sh.rustup.rs -sSf | \
-        sh -s -- --default-toolchain ${JINUX_RUST_VERSION} -y \
+        sh -s -- --default-toolchain ${ASTER_RUST_VERSION} -y \
     && rm -rf /root/.cargo/registry && rm -rf /root/.cargo/git \
     && cargo -V \
     && rustup component add rust-src rustc-dev llvm-tools-preview
@@ -164,13 +202,15 @@ RUN cargo install \
 
 FROM rust
 
-# Install all Jinux dependent packages
+# Install all Asterinas dependent packages
 RUN apt update && apt-get install -y --no-install-recommends \
     cpio \
     cpuid \
     file \
     gdb \
+    grub-efi-amd64 \
     grub-efi-amd64-bin \
+    grub-efi-amd64-dbg \
     libpixman-1-dev     `# running dependency for QEMU` \
     mtools              `# used by grub-mkrescue` \
     net-tools \
@@ -188,7 +228,7 @@ RUN apt clean && rm -rf /var/lib/apt/lists/*
 
 # Prepare the system call test suite
 COPY --from=syscall_test /root/syscall_test/build/syscall_test_bins /root/syscall_test_bins
-ENV JINUX_PREBUILT_SYSCALL_TEST=/root/syscall_test_bins
+ENV ASTER_PREBUILT_SYSCALL_TEST=/root/syscall_test_bins
 
 # Install QEMU built from the previous stages
 COPY --from=qemu /usr/local/qemu /usr/local/qemu
@@ -208,9 +248,12 @@ RUN ln -sf /usr/share/grub/unicode.pf2 /usr/local/grub/share/grub/unicode.pf2
 # Install Busybox built from the previous stages
 COPY --from=busybox /root/busybox/busybox /bin/busybox
 
-# Add the path of jinux tools
-ENV PATH="/root/jinux/target/bin:${PATH}"
+# Install benchmarks built from the previous stages
+COPY --from=build-benchmarks /usr/local/benchmark /usr/local/benchmark
 
-VOLUME [ "/root/jinux" ]
+# Add the path of Asterinas tools
+ENV PATH="/root/asterinas/target/bin:${PATH}"
 
-WORKDIR /root/jinux
+VOLUME [ "/root/asterinas" ]
+
+WORKDIR /root/asterinas

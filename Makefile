@@ -1,4 +1,4 @@
-# Make varaiables and defaults, you should refer to jinux-runner for more details
+# Make varaiables and defaults, you should refer to aster-runner for more details
 AUTO_TEST ?= none
 BOOT_METHOD ?= qemu-grub
 BOOT_PROTOCOL ?= multiboot2
@@ -12,15 +12,20 @@ KTEST ?= 0
 KTEST_CRATES ?= all
 KTEST_WHITELIST ?=
 SKIP_GRUB_MENU ?= 1
+SYSCALL_TEST_DIR ?= /tmp
 RELEASE_MODE ?= 0
 # End of setting up Make varaiables
 
-KERNEL_CMDLINE := SHELL="/bin/sh" LOGNAME="root" HOME="/" USER="root" PATH="/bin" init=/usr/bin/busybox
+KERNEL_CMDLINE := SHELL="/bin/sh" LOGNAME="root" HOME="/" USER="root" PATH="/bin:/benchmark" init=/usr/bin/busybox
 KERNEL_CMDLINE += ktest.whitelist="$(KTEST_WHITELIST)"
 INIT_CMDLINE := sh -l
 ifeq ($(AUTO_TEST), syscall)
 BUILD_SYSCALL_TEST := 1
+KERNEL_CMDLINE += SYSCALL_TEST_DIR=$(SYSCALL_TEST_DIR)
 INIT_CMDLINE += /opt/syscall_test/run_syscall_test.sh
+endif
+ifeq ($(AUTO_TEST), regression)
+INIT_CMDLINE += /regression/run_regression_test.sh
 endif
 ifeq ($(AUTO_TEST), boot)
 INIT_CMDLINE += -c exit 0
@@ -38,10 +43,6 @@ endif
 CARGO_KRUN_ARGS += -- '$(KERNEL_CMDLINE) -- $(INIT_CMDLINE)'
 CARGO_KRUN_ARGS += --boot-method="$(BOOT_METHOD)"
 CARGO_KRUN_ARGS += --boot-protocol="$(BOOT_PROTOCOL)"
-
-ifeq ($(RELEASE_MODE), 1)
-CARGO_KRUN_ARGS += --release-mode
-endif
 
 ifeq ($(EMULATE_IOMMU), 1)
 CARGO_KRUN_ARGS += --emulate-iommu
@@ -84,18 +85,20 @@ export CARGO := cargo
 USERMODE_TESTABLE := \
     runner \
     framework/libs/align_ext \
+	framework/libs/linux-bzimage/builder \
+	framework/libs/linux-bzimage/boot-params \
     framework/libs/ktest \
     framework/libs/ktest-proc-macro \
     services/libs/cpio-decoder \
     services/libs/int-to-c-enum \
     services/libs/int-to-c-enum/derive \
-    services/libs/jinux-rights \
-    services/libs/jinux-rights-proc \
+    services/libs/aster-rights \
+    services/libs/aster-rights-proc \
     services/libs/keyable-arc \
     services/libs/typeflags \
     services/libs/typeflags-util
 
-.PHONY: all setup build tools run test docs check clean
+.PHONY: all setup build tools run test docs check clean update_initramfs
 
 all: build
 
@@ -136,3 +139,7 @@ clean:
 
 filetest:
 	@make run KTEST=1 KTEST_WHITELIST=jinux_std::fs::exfat::test::test_new_exfat,test_create,test_create_and_list_file,test_write_and_read_file,test_write_and_read_file_direct,test_interleaved_write,test_unlink_single,test_unlink_multiple,test_rmdir,test_rename_file,test_rename_dir,test_bitmap_modify_bit,test_bitmap_modify_chunk,test_bitmap_find,test_resize_single,test_resize_multiple,test_random_sequence KTEST_CRATES=jinux-std
+	
+update_initramfs:
+	@make --no-print-directory -C regression clean
+	@make --no-print-directory -C regression

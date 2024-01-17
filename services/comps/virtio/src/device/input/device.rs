@@ -7,9 +7,9 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use aster_frame::{io_mem::IoMem, offset_of, sync::SpinLock, trap::TrapFrame};
+use aster_util::{field_ptr, safe_ptr::SafePtr};
 use bitflags::bitflags;
-use jinux_frame::{io_mem::IoMem, offset_of, sync::SpinLock, trap::TrapFrame};
-use jinux_util::{field_ptr, safe_ptr::SafePtr};
 use log::{debug, info};
 use pod::Pod;
 use virtio_input_decoder::{DecodeType, Decoder};
@@ -80,7 +80,7 @@ impl InputDevice {
 
         for (i, event) in event_buf.as_mut().iter_mut().enumerate() {
             // FIEME: replace slice with a more secure data structure to use dma mapping.
-            let token = event_queue.add(&[], &[event.as_bytes_mut()]);
+            let token = event_queue.add_buf(&[], &[event.as_bytes_mut()]);
             match token {
                 Ok(value) => {
                     assert_eq!(value, i as u16);
@@ -112,7 +112,7 @@ impl InputDevice {
 
         fn handle_input(_: &TrapFrame) {
             debug!("Handle Virtio input interrupt");
-            let device = jinux_input::get_device(super::DEVICE_NAME).unwrap();
+            let device = aster_input::get_device(super::DEVICE_NAME).unwrap();
             device.handle_irq().unwrap();
         }
 
@@ -131,7 +131,7 @@ impl InputDevice {
 
         device.transport.finish_init();
 
-        jinux_input::register_device(super::DEVICE_NAME.to_string(), Arc::new(device));
+        aster_input::register_device(super::DEVICE_NAME.to_string(), Arc::new(device));
 
         Ok(())
     }
@@ -146,7 +146,7 @@ impl InputDevice {
             let event = &mut self.event_buf.lock()[token as usize];
             // requeue
             // FIEME: replace slice with a more secure data structure to use dma mapping.
-            if let Ok(new_token) = lock.add(&[], &[event.as_bytes_mut()]) {
+            if let Ok(new_token) = lock.add_buf(&[], &[event.as_bytes_mut()]) {
                 // This only works because nothing happen between `pop_used` and `add` that affects
                 // the list of free descriptors in the queue, so `add` reuses the descriptor which
                 // was just freed by `pop_used`.
@@ -183,7 +183,7 @@ impl InputDevice {
     }
 }
 
-impl jinux_input::InputDevice for InputDevice {
+impl aster_input::InputDevice for InputDevice {
     fn handle_irq(&self) -> Option<()> {
         // one interrupt may contains serval input, so it should loop
         loop {

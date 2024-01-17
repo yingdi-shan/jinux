@@ -1,12 +1,12 @@
 use core::{fmt::Debug, hint::spin_loop, mem::size_of};
 
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
-use jinux_frame::{offset_of, sync::SpinLock, trap::TrapFrame};
-use jinux_network::{
+use aster_frame::{offset_of, sync::SpinLock, trap::TrapFrame};
+use aster_network::{
     buffer::{RxBuffer, TxBuffer},
     AnyNetworkDevice, EthernetAddr, NetDeviceIrqHandler, VirtioNetError,
 };
-use jinux_util::{field_ptr, slot_vec::SlotVec};
+use aster_util::{field_ptr, slot_vec::SlotVec};
 use log::debug;
 use pod::Pod;
 use smoltcp::phy::{DeviceCapabilities, Medium};
@@ -61,7 +61,7 @@ impl NetworkDevice {
         for i in 0..QUEUE_SIZE {
             let mut rx_buffer = RxBuffer::new(RX_BUFFER_LEN, size_of::<VirtioNetHdr>());
             // FIEME: Replace rx_buffer with VM segment-based data structure to use dma mapping.
-            let token = recv_queue.add(&[], &[rx_buffer.buf_mut()])?;
+            let token = recv_queue.add_buf(&[], &[rx_buffer.buf_mut()])?;
             assert_eq!(i, token);
             assert_eq!(rx_buffers.put(rx_buffer) as u16, i);
         }
@@ -87,7 +87,7 @@ impl NetworkDevice {
 
         /// Interrupt handler if network device receives some packet
         fn handle_network_event(_: &TrapFrame) {
-            jinux_network::handle_recv_irq(super::DEVICE_NAME);
+            aster_network::handle_recv_irq(super::DEVICE_NAME);
         }
 
         device
@@ -99,7 +99,7 @@ impl NetworkDevice {
             .register_queue_callback(QUEUE_RECV, Box::new(handle_network_event), false)
             .unwrap();
 
-        jinux_network::register_device(
+        aster_network::register_device(
             super::DEVICE_NAME.to_string(),
             Arc::new(SpinLock::new(Box::new(device))),
         );
@@ -111,7 +111,7 @@ impl NetworkDevice {
     fn add_rx_buffer(&mut self, mut rx_buffer: RxBuffer) -> Result<(), VirtioNetError> {
         let token = self
             .recv_queue
-            .add(&[], &[rx_buffer.buf_mut()])
+            .add_buf(&[], &[rx_buffer.buf_mut()])
             .map_err(queue_to_network_error)?;
         assert!(self.rx_buffers.put_at(token as usize, rx_buffer).is_none());
         if self.recv_queue.should_notify() {
@@ -143,7 +143,7 @@ impl NetworkDevice {
         let header = VirtioNetHdr::default();
         let token = self
             .send_queue
-            .add(&[header.as_bytes(), tx_buffer.buf()], &[])
+            .add_buf(&[header.as_bytes(), tx_buffer.buf()], &[])
             .map_err(queue_to_network_error)?;
 
         if self.send_queue.should_notify() {

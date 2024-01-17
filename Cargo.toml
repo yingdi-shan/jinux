@@ -1,21 +1,21 @@
 [package]
-name = "jinux"
-version = "0.2.1"
+name = "asterinas"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
-name = "jinux"
+name = "asterinas"
 path = "kernel/main.rs"
 
 [dependencies]
-jinux-frame = { path = "framework/jinux-frame" }
-jinux-std = { path = "services/libs/jinux-std" }
+aster-frame = { path = "framework/aster-frame" }
+aster-std = { path = "services/libs/aster-std" }
 component = { path = "services/libs/comp-sys/component" }
 
 [dev-dependencies]
 x86_64 = "0.14.2"
-jinux-time = { path = "services/comps/time" }
-jinux-framebuffer = { path = "services/comps/framebuffer" }
+aster-time = { path = "services/comps/time" }
+aster-framebuffer = { path = "services/comps/framebuffer" }
 
 [profile.dev]
 opt-level = 0
@@ -33,9 +33,11 @@ panic = "unwind"
 
 members = [
     "runner",
-    "framework/jinux-frame",
-    "framework/jinux-frame/src/arch/x86/boot/linux_boot/setup",
+    "framework/aster-frame",
     "framework/libs/align_ext",
+    "framework/libs/linux-bzimage/builder",
+    "framework/libs/linux-bzimage/boot-params",
+    "framework/libs/linux-bzimage/setup",
     "framework/libs/ktest",
     "framework/libs/tdx-guest",
     "services/comps/block",
@@ -48,10 +50,10 @@ members = [
     "services/libs/cpio-decoder",
     "services/libs/int-to-c-enum",
     "services/libs/int-to-c-enum/derive",
-    "services/libs/jinux-rights",
-    "services/libs/jinux-rights-proc",
-    "services/libs/jinux-std",
-    "services/libs/jinux-util",
+    "services/libs/aster-rights",
+    "services/libs/aster-rights-proc",
+    "services/libs/aster-std",
+    "services/libs/aster-util",
     "services/libs/keyable-arc",
     "services/libs/typeflags",
     "services/libs/typeflags-util",
@@ -65,4 +67,4 @@ exclude = [
 ]
 
 [features]
-intel_tdx = ["jinux-frame/intel_tdx", "jinux-std/intel_tdx"]
+intel_tdx = ["aster-frame/intel_tdx", "aster-std/intel_tdx"]

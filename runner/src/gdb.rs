@@ -7,10 +7,12 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf, process::Command};
 ///
 /// If argument `gdb_grub` is set true, it will run GRUB's gdb script.
 ///
+/// Make sure to set GRUB_PREFIX to the actual GRUB you are using.
+///
 /// When debugging grub, the OVMF firmware will load the grub kernel at an
 /// address unknown at the moment. You should use the debug message from our
 /// custom built OVMF firmware and read the entrypoint address
-/// (often `0x0007E685000`). Then use the following GDB command to load symbols:
+/// (often `0x0007E684000`). Then use the following GDB command to load symbols:
 /// `dynamic_load_symbols ${ENTRY_ADDRESS}`.
 /// During each run, the address is unlikely to change. But the address will
 /// depend on the versions of grub or OVMF.
@@ -21,7 +23,7 @@ pub fn run_gdb_client(path: &PathBuf, gdb_grub: bool) {
     let mut gdb_cmd = Command::new("gdb");
     // Set the architecture, otherwise GDB will complain about.
     gdb_cmd.arg("-ex").arg("set arch i386:x86-64:intel");
-    let grub_script = "/tmp/jinux-gdb-grub-script";
+    let grub_script = "/tmp/aster-gdb-grub-script";
     if gdb_grub {
         let grub_dir = PathBuf::from(qemu_grub_efi::GRUB_PREFIX)
             .join("lib")
@@ -41,7 +43,7 @@ pub fn run_gdb_client(path: &PathBuf, gdb_grub: bool) {
         for line in lines {
             if line.contains("target remote :1234") {
                 // Connect to the GDB server.
-                writeln!(f, "target remote /tmp/jinux-gdb-socket").unwrap();
+                writeln!(f, "target remote /tmp/aster-gdb-socket").unwrap();
             } else {
                 writeln!(f, "{}", line).unwrap();
             }
@@ -53,7 +55,7 @@ pub fn run_gdb_client(path: &PathBuf, gdb_grub: bool) {
         // Connect to the GDB server.
         gdb_cmd
             .arg("-ex")
-            .arg("target remote /tmp/jinux-gdb-socket");
+            .arg("target remote /tmp/aster-gdb-socket");
     }
     // Connect to the GDB server and run.
     println!("running:{:#?}", gdb_cmd);

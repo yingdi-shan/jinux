@@ -1,9 +1,9 @@
 use core::hint::spin_loop;
 
 use alloc::{boxed::Box, fmt::Debug, string::ToString, sync::Arc, vec::Vec};
-use jinux_console::{AnyConsoleDevice, ConsoleCallback};
-use jinux_frame::{config::PAGE_SIZE, io_mem::IoMem, sync::SpinLock, trap::TrapFrame};
-use jinux_util::safe_ptr::SafePtr;
+use aster_console::{AnyConsoleDevice, ConsoleCallback};
+use aster_frame::{config::PAGE_SIZE, io_mem::IoMem, sync::SpinLock, trap::TrapFrame};
+use aster_util::safe_ptr::SafePtr;
 use log::debug;
 
 use crate::{
@@ -26,7 +26,7 @@ pub struct ConsoleDevice {
 impl AnyConsoleDevice for ConsoleDevice {
     fn send(&self, value: &[u8]) {
         let mut transmit_queue = self.transmit_queue.lock_irq_disabled();
-        transmit_queue.add(&[value], &[]).unwrap();
+        transmit_queue.add_buf(&[value], &[]).unwrap();
         if transmit_queue.should_notify() {
             transmit_queue.notify();
         }
@@ -45,7 +45,7 @@ impl AnyConsoleDevice for ConsoleDevice {
 
         let mut recv_buffer = self.buffer.lock();
         buf.copy_from_slice(&recv_buffer.as_ref()[..len as usize]);
-        receive_queue.add(&[], &[recv_buffer.as_mut()]).unwrap();
+        receive_queue.add_buf(&[], &[recv_buffer.as_mut()]).unwrap();
         if receive_queue.should_notify() {
             receive_queue.notify();
         }
@@ -68,7 +68,7 @@ impl AnyConsoleDevice for ConsoleDevice {
         for callback in lock.iter() {
             callback.call((buffer,));
         }
-        receive_queue.add(&[], &[recv_buffer.as_mut()]).unwrap();
+        receive_queue.add_buf(&[], &[recv_buffer.as_mut()]).unwrap();
         if receive_queue.should_notify() {
             receive_queue.notify();
         }
@@ -114,7 +114,7 @@ impl ConsoleDevice {
 
         let mut receive_queue = device.receive_queue.lock();
         receive_queue
-            .add(&[], &[device.buffer.lock().as_mut()])
+            .add_buf(&[], &[device.buffer.lock().as_mut()])
             .unwrap();
         if receive_queue.should_notify() {
             receive_queue.notify();
@@ -130,14 +130,14 @@ impl ConsoleDevice {
             .unwrap();
         device.transport.finish_init();
 
-        jinux_console::register_device(DEVICE_NAME.to_string(), Arc::new(device));
+        aster_console::register_device(DEVICE_NAME.to_string(), Arc::new(device));
 
         Ok(())
     }
 }
 
 fn handle_console_input(_: &TrapFrame) {
-    jinux_console::get_device(DEVICE_NAME).unwrap().handle_irq();
+    aster_console::get_device(DEVICE_NAME).unwrap().handle_irq();
 }
 
 fn config_space_change(_: &TrapFrame) {
