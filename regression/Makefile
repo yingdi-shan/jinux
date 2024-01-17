@@ -4,6 +4,7 @@ BUILD_DIR := $(CUR_DIR)/build
 INITRAMFS := $(BUILD_DIR)/initramfs
 INITRAMFS_IMAGE := $(BUILD_DIR)/initramfs.cpio.gz
 EXT2_IMAGE := $(BUILD_DIR)/ext2.img
+EXFAT_IMAGE := $(BUILD_DIR)/exfat.img
 SHELL := /bin/bash
 INITRAMFS_EMPTY_DIRS := \
 	$(INITRAMFS)/sbin \
@@ -12,7 +13,8 @@ INITRAMFS_EMPTY_DIRS := \
 	$(INITRAMFS)/opt \
 	$(INITRAMFS)/proc \
 	$(INITRAMFS)/dev \
-	$(INITRAMFS)/ext2
+	$(INITRAMFS)/ext2 \
+	$(INITRAMFS)/exfat
 INITRAMFS_ALL_DIRS := \
 	$(INITRAMFS)/etc \
 	$(INITRAMFS)/lib/x86_64-linux-gnu \
@@ -96,7 +98,11 @@ $(EXT2_IMAGE):
 	@dd if=/dev/zero of=$(EXT2_IMAGE) bs=2G count=1
 	@mke2fs $(EXT2_IMAGE)
 
-build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE)
+$(EXFAT_IMAGE):
+	@fallocate -l 128M $(EXFAT_IMAGE)
+	@mkfs.exfat $(EXFAT_IMAGE)
+
+build: $(INITRAMFS_IMAGE) $(EXT2_IMAGE) $(EXFAT_IMAGE)
 
 clean:
 	@rm -rf $(BUILD_DIR)

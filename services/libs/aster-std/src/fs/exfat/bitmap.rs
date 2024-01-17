@@ -21,6 +21,7 @@ pub struct ExfatBitmap {
     chain: ExfatChain,
     // TODO: use jinux_util::bitmap
     bitvec: BitVec<BitStore>,
+    dirty_bytes: VecDeque<Range<usize>>,
 
     free_cluster_num: u32,
     fs: Weak<ExfatFS>,
@@ -32,7 +33,7 @@ impl ExfatBitmap {
         root_page_cache: Vmo<Full>,
         root_chain: ExfatChain,
     ) -> Result<Self> {
-        let dentry_iterator = ExfatDentryIterator::new(root_page_cache, root_chain, 0, None)?;
+        let dentry_iterator = ExfatDentryIterator::new(root_page_cache, 0, None)?;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;
@@ -77,6 +78,7 @@ impl ExfatBitmap {
         Ok(ExfatBitmap {
             chain,
             bitvec: BitVec::from_slice(&buf),
+            dirty_bytes: VecDeque::new(),
             free_cluster_num,
             fs: fs_weak,
         })
@@ -315,7 +317,7 @@ impl ExfatBitmap {
         Ok(())
     }
 
-    fn write_bitmap_range_to_disk(&self, clusters: Range<ClusterID>, sync: bool) -> Result<()> {
+    fn write_bitmap_range_to_disk(&mut self, clusters: Range<ClusterID>, sync: bool) -> Result<()> {
         let unit_size = core::mem::size_of::<BitStore>() * BITS_PER_BYTE;
         let start_byte_off: usize = (clusters.start - EXFAT_RESERVED_CLUSTERS) as usize / unit_size;
         let end_byte_off: usize =
@@ -329,6 +331,21 @@ impl ExfatBitmap {
         let phys_offset = pos.0.physical_cluster_start_offset() + pos.1;
         self.fs().write_meta_at(phys_offset, byte_chunk)?;
 
+        let byte_range = phys_offset..phys_offset + byte_chunk.len();
+
+        if sync {
+            self.fs().sync_meta_at(byte_range.clone())?;
+        } else {
+            self.dirty_bytes.push_back(byte_range.clone());
+        }
+
+        Ok(())
+    }
+
+    pub fn sync(&mut self) -> Result<()> {
+        while let Some(range) = self.dirty_bytes.pop_front() {
+            self.fs().sync_meta_at(range)?;
+        }
         Ok(())
     }
 }

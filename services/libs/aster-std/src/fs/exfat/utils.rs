@@ -51,6 +51,25 @@ pub struct DosTimestamp {
 }
 
 impl DosTimestamp {
+    pub fn now() -> Result<Self> {
+        #[cfg(not(ktest))]
+        {
+            use crate::time::now_as_duration;
+            return DosTimestamp::from_duration(now_as_duration(
+                &crate::time::ClockID::CLOCK_REALTIME,
+            )?);
+        }
+
+        //When ktesting, the time module has not been initialized yet, return a fake value instead.
+        #[cfg(ktest)]
+        {
+            use crate::time::SystemTime;
+            return DosTimestamp::from_duration(
+                SystemTime::UNIX_EPOCH.duration_since(&SystemTime::UNIX_EPOCH)?,
+            );
+        }
+    }
+
     pub fn new(time: u16, date: u16, increament_10ms: u8, utc_offset: u8) -> Result<Self> {
         let time = Self {
             time,

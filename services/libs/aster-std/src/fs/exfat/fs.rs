@@ -126,12 +126,25 @@ impl ExfatFS {
         self.inodes.read().get(&hash).cloned()
     }
 
-    pub(super) fn evict_inode(&self, hash: usize) {
+    pub(super) fn remove_inode(&self, hash: usize) {
         let _ = self.inodes.write().remove(&hash);
+    }
+
+    pub(super) fn evict_inode(&self, hash: usize) -> Result<()> {
+        if let Some(inode) = self.inodes.read().get(&hash).cloned() {
+            inode.sync()?;
+        }
+        self.inodes.write().remove(&hash);
+        Ok(())
     }
 
     pub(super) fn insert_inode(&self, inode: Arc<ExfatInode>) -> Option<Arc<ExfatInode>> {
         self.inodes.write().insert(inode.hash_index(), inode)
+    }
+
+    pub(super) fn sync_meta_at(&self, range: core::ops::Range<usize>) -> Result<()> {
+        self.meta_cache.pages().decommit(range)?;
+        Ok(())
     }
 
     pub(super) fn write_meta_at(&self, offset: usize, buf: &[u8]) -> Result<()> {
@@ -172,7 +185,7 @@ impl ExfatFS {
         Ok(FatValue::from(value))
     }
 
-    pub fn write_next_fat(&self, cluster: ClusterID, value: FatValue) -> Result<()> {
+    pub fn write_next_fat(&self, cluster: ClusterID, value: FatValue, sync: bool) -> Result<()> {
         let sb: ExfatSuperBlock = self.super_block();
         let sector_size = sb.sector_size;
         let raw_value: u32 = value.into();
@@ -182,11 +195,19 @@ impl ExfatFS {
             sb.fat1_start_sector * sector_size as u64 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
 
         self.write_meta_at(position as usize, &raw_value.to_le_bytes())?;
+        if sync {
+            self.sync_meta_at(position as usize..position as usize + FAT_ENTRY_SIZE)?;
+        }
 
         if sb.fat1_start_sector != sb.fat2_start_sector {
             let mirror_position = sb.fat2_start_sector * sector_size as u64
                 + (cluster as u64) * FAT_ENTRY_SIZE as u64;
             self.write_meta_at(mirror_position as usize, &raw_value.to_le_bytes())?;
+            if sync {
+                self.sync_meta_at(
+                    mirror_position as usize..mirror_position as usize + FAT_ENTRY_SIZE,
+                )?;
+            }
         }
 
         self.fat_cache.write().put(cluster, raw_value);
@@ -356,6 +377,7 @@ impl PageCacheBackend for ExfatFS {
 
 impl FileSystem for ExfatFS {
     fn sync(&self) -> Result<()> {
+        self.bitmap.lock().sync()?;
         for inode in self.inodes.read().values() {
             inode.sync()?;
         }

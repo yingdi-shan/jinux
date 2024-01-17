@@ -224,7 +224,7 @@ impl ExfatChain {
     fn alloc_cluster_fat(
         &mut self,
         num_to_be_allocated: u32,
-        sync_bitmap: bool,
+        sync: bool,
         bitmap: &mut SpinLockGuard<'_, ExfatBitmap>,
     ) -> Result<ClusterID> {
         let fs = self.fs();
@@ -233,17 +233,17 @@ impl ExfatChain {
         let mut cur_cluster = EXFAT_FIRST_CLUSTER;
         for i in 0..num_to_be_allocated {
             cur_cluster = bitmap.find_next_free_cluster(cur_cluster)?;
-            bitmap.set_bitmap_used(cur_cluster, sync_bitmap)?;
+            bitmap.set_bitmap_used(cur_cluster, sync)?;
 
             if i == 0 {
                 alloc_start_cluster = cur_cluster;
             } else {
-                fs.write_next_fat(prev_cluster, FatValue::Next(cur_cluster))?;
+                fs.write_next_fat(prev_cluster, FatValue::Next(cur_cluster), sync)?;
             }
 
             prev_cluster = cur_cluster;
         }
-        fs.write_next_fat(prev_cluster, FatValue::EndOfChain)?;
+        fs.write_next_fat(prev_cluster, FatValue::EndOfChain, sync)?;
         Ok(alloc_start_cluster)
     }
 
@@ -289,11 +289,7 @@ impl ClusterAllocator for ExfatChain {
     // Append clusters at the end of the chain, return the first allocated cluster
     // Caller should update size_allocated accordingly.
     // The file system must be locked before calling.
-    fn extend_clusters(
-        &mut self,
-        num_to_be_allocated: u32,
-        sync_bitmap: bool,
-    ) -> Result<ClusterID> {
+    fn extend_clusters(&mut self, num_to_be_allocated: u32, sync: bool) -> Result<ClusterID> {
         let fs = self.fs();
 
         let bitmap_binding = fs.bitmap();
@@ -305,7 +301,7 @@ impl ClusterAllocator for ExfatChain {
 
         if self.num_clusters == 0 {
             let allocated =
-                self.alloc_cluster_from_empty(num_to_be_allocated, &mut bitmap, sync_bitmap)?;
+                self.alloc_cluster_from_empty(num_to_be_allocated, &mut bitmap, sync)?;
             self.num_clusters += num_to_be_allocated;
             return Ok(allocated);
         }
@@ -321,33 +317,37 @@ impl ClusterAllocator for ExfatChain {
             let clusters = current_end..current_end + num_to_be_allocated;
             if bitmap.is_cluster_range_free(clusters.clone())? {
                 // Considering that the following clusters may be out of range, we should deal with this error here(just turn to fat allocation)
-                bitmap.set_bitmap_range_used(clusters, sync_bitmap)?;
+                bitmap.set_bitmap_range_used(clusters, sync)?;
                 self.num_clusters += num_to_be_allocated;
                 return Ok(start_cluster);
             } else {
                 // break the chain.
                 for i in 0..num_clusters - 1 {
-                    fs.write_next_fat(start_cluster + i, FatValue::Next(start_cluster + i + 1))?;
+                    fs.write_next_fat(
+                        start_cluster + i,
+                        FatValue::Next(start_cluster + i + 1),
+                        sync,
+                    )?;
                 }
-                fs.write_next_fat(start_cluster + num_clusters - 1, FatValue::EndOfChain)?;
+                fs.write_next_fat(start_cluster + num_clusters - 1, FatValue::EndOfChain, sync)?;
                 self.set_flags(FatChainFlags::ALLOC_POSSIBLE);
             }
         }
 
         //Allocate remaining clusters the tail.
         let allocated_start_cluster =
-            self.alloc_cluster_fat(num_to_be_allocated, sync_bitmap, &mut bitmap)?;
+            self.alloc_cluster_fat(num_to_be_allocated, sync, &mut bitmap)?;
 
         //Insert allocated clusters to the tail.
         let tail_cluster = self.walk(num_clusters - 1)?.cluster_id();
-        fs.write_next_fat(tail_cluster, FatValue::Next(allocated_start_cluster))?;
+        fs.write_next_fat(tail_cluster, FatValue::Next(allocated_start_cluster), sync)?;
 
         self.num_clusters += num_to_be_allocated;
 
         Ok(allocated_start_cluster)
     }
 
-    fn remove_clusters_from_tail(&mut self, drop_num: u32, sync_bitmap: bool) -> Result<()> {
+    fn remove_clusters_from_tail(&mut self, drop_num: u32, sync: bool) -> Result<()> {
         let fs = self.fs();
 
         let num_clusters = self.num_clusters;
@@ -363,14 +363,14 @@ impl ClusterAllocator for ExfatChain {
         if !self.fat_in_use() {
             bitmap.set_bitmap_range_unused(
                 trunc_start_cluster..trunc_start_cluster + drop_num,
-                sync_bitmap,
+                sync,
             )?;
         } else {
-            self.remove_cluster_fat(trunc_start_cluster, drop_num, sync_bitmap, &mut bitmap)?;
+            self.remove_cluster_fat(trunc_start_cluster, drop_num, sync, &mut bitmap)?;
             if drop_num != num_clusters {
                 let tail_cluster = self.walk(num_clusters - drop_num - 1)?.cluster_id();
                 self.fs()
-                    .write_next_fat(tail_cluster, FatValue::EndOfChain)?;
+                    .write_next_fat(tail_cluster, FatValue::EndOfChain, sync)?;
             }
         }
 

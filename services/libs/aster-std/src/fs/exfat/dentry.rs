@@ -5,12 +5,11 @@ use aster_rights::Full;
 
 use crate::fs::utils::{InodeMode, InodeType};
 use crate::prelude::*;
-use crate::time::now_as_duration;
 use crate::vm::vmo::Vmo;
 
 use super::constants::{EXFAT_FILE_NAME_LEN, MAX_NAME_LENGTH};
 use super::fat::ExfatChainPosition;
-use super::fat::{ExfatChain, FatChainFlags};
+use super::fat::FatChainFlags;
 use super::fs::ExfatFS;
 use super::inode::FatAttr;
 use super::utils::{calc_checksum_16, DosTimestamp};
@@ -212,8 +211,7 @@ impl ExfatDentrySet {
         let name = ExfatName::from_str(name)?;
         let mut name_dentries = name.to_dentries();
 
-        let current_time = now_as_duration(&crate::time::ClockID::CLOCK_REALTIME)?;
-        let dos_time = DosTimestamp::from_duration(current_time)?;
+        let dos_time = DosTimestamp::now()?;
 
         let mut dentries = Vec::new();
         let file_dentry = ExfatDentry::File(ExfatFileDentry {
@@ -256,8 +254,8 @@ impl ExfatDentrySet {
         Self::new(dentries, false)
     }
 
-    pub(super) fn read_from(page_cache: Vmo<Full>, pos: &ExfatChainPosition) -> Result<Self> {
-        let mut iter = ExfatDentryIterator::new(page_cache, pos.0.clone(), pos.1, None)?;
+    pub(super) fn read_from(page_cache: Vmo<Full>, offset: usize) -> Result<Self> {
+        let mut iter = ExfatDentryIterator::new(page_cache.dup().unwrap(), offset, None)?;
         let primary_dentry_result = iter.next();
 
         if primary_dentry_result.is_none() {
@@ -269,7 +267,7 @@ impl ExfatDentrySet {
         if let ExfatDentry::File(file_dentry) = primary_dentry {
             Self::read_from_iterator(&file_dentry, &mut iter)
         } else {
-            return_errno_with_message!(Errno::EIO, "invalid dentry type")
+            return_errno_with_message!(Errno::EIO, "invalid dentry type, file dentry expected")
         }
     }
 
@@ -418,9 +416,7 @@ impl Checksum for ExfatDentrySet {
 }
 
 pub struct ExfatDentryIterator {
-    ///The position of current cluster
-    chain: ExfatChain,
-    ///The dentry position in current cluster.
+    ///The dentry position in current inode.
     entry: u32,
     ///Used to hold cached dentries
     page_cache: Vmo<Full>,
@@ -429,12 +425,7 @@ pub struct ExfatDentryIterator {
 }
 
 impl ExfatDentryIterator {
-    pub fn new(
-        page_cache: Vmo<Full>,
-        chain: ExfatChain,
-        offset: usize,
-        size: Option<usize>,
-    ) -> Result<Self> {
+    pub fn new(page_cache: Vmo<Full>, offset: usize, size: Option<usize>) -> Result<Self> {
         if size.is_some() && size.unwrap() % DENTRY_SIZE != 0 {
             return_errno_with_message!(Errno::EINVAL, "remaining size unaligned to dentry size")
         }
@@ -443,18 +434,11 @@ impl ExfatDentryIterator {
             return_errno_with_message!(Errno::EINVAL, "dentry offset unaligned to dentry size")
         }
 
-        let (chain, offset) = chain.walk_to_cluster_at_offset(offset)?;
-
         Ok(Self {
-            chain,
             entry: (offset / DENTRY_SIZE) as u32,
             page_cache,
             size,
         })
-    }
-
-    pub fn chain_and_offset(&self) -> ExfatChainPosition {
-        (self.chain.clone(), self.entry as usize * DENTRY_SIZE)
     }
 }
 
@@ -462,7 +446,7 @@ impl Iterator for ExfatDentryIterator {
     type Item = Result<ExfatDentry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.chain.is_current_cluster_valid() {
+        if self.entry as usize * DENTRY_SIZE >= self.page_cache.size() {
             return None;
         }
 

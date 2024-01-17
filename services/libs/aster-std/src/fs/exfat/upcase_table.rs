@@ -30,7 +30,7 @@ impl ExfatUpcaseTable {
         root_page_cache: Vmo<Full>,
         root_chain: ExfatChain,
     ) -> Result<Self> {
-        let dentry_iterator = ExfatDentryIterator::new(root_page_cache, root_chain, 0, None)?;
+        let dentry_iterator = ExfatDentryIterator::new(root_page_cache, 0, None)?;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;

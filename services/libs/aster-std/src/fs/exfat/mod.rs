@@ -13,7 +13,7 @@ pub use fs::ExfatMountOptions;
 pub use inode::ExfatInode;
 
 /// Exfat disk image
-static EXFAT_IMAGE: &[u8] = include_bytes!("../../../../../../exfat.img");
+static EXFAT_IMAGE: &[u8] = include_bytes!("../../../../../../regression/build/exfat.img");
 
 use crate::prelude::*;
 use alloc::fmt::Debug;
@@ -116,14 +116,6 @@ pub fn load_exfat() -> Arc<ExfatFS> {
     assert!(fs.is_ok(), "Fs failed to init:{:?}", fs.unwrap_err());
     fs.unwrap()
 }
-
-// pub fn open_exfat() -> Arc<ExfatFS> {
-//     component::init_all(component::parse_metadata!());
-//     crate::driver::init();
-//     let block_device = crate::driver::block::virtio_blk_device();
-
-//     ExfatFS::open(block_device.clone(), ExfatMountOptions::default()).unwrap()
-// }
 
 mod test {
     const SECTOR_SIZE: usize = 512;
