@@ -91,9 +91,7 @@ impl ExfatFS {
             FatChainFlags::ALLOC_POSSIBLE,
         )?;
 
-        error!("begin to build root inode.");
         let root = ExfatInode::build_root_inode(weak_fs.clone(), root_chain.clone())?;
-        error!("root inode built.");
 
         let upcase_table = ExfatUpcaseTable::load_upcase_table(
             weak_fs.clone(),
@@ -106,8 +104,6 @@ impl ExfatFS {
             root.page_cache().unwrap(),
             root_chain.clone(),
         )?;
-
-        error!("bitmap read.");
 
         *exfat_fs.bitmap.lock() = bitmap;
         *exfat_fs.upcase_table.lock() = upcase_table;
@@ -144,7 +140,6 @@ impl ExfatFS {
     }
 
     pub(super) fn read_meta_at(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
-        error!("Begin to read fs metadata from page cache.");
         self.meta_cache.pages().read_bytes(offset, buf)?;
         Ok(())
     }
@@ -336,13 +331,11 @@ impl ExfatFS {
 
 impl PageCacheBackend for ExfatFS {
     fn read_page(&self, idx: usize, frame: &VmFrame) -> Result<()> {
-        error!("Begin to read fs metadata from disk. idx:{}", idx);
         if self.fs_size() < idx * PAGE_SIZE {
             return_errno_with_message!(Errno::EINVAL, "invalid read size")
         }
         self.block_device
             .read_block_sync(BlockId::new(idx as u64), frame)?;
-        error!("FS metadata read into pagecache.");
         Ok(())
     }
 

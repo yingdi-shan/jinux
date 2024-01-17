@@ -470,7 +470,7 @@ impl Iterator for ExfatDentryIterator {
             return None;
         }
 
-        let byte_start = self.entry as usize * DENTRY_SIZE % PAGE_SIZE;
+        let byte_start = self.entry as usize * DENTRY_SIZE;
         let mut dentry_buf = [0u8; DENTRY_SIZE];
 
         let read_result = self.page_cache.read_bytes(byte_start, &mut dentry_buf);
