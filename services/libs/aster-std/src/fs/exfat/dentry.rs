@@ -8,7 +8,6 @@ use crate::prelude::*;
 use crate::vm::vmo::Vmo;
 
 use super::constants::{EXFAT_FILE_NAME_LEN, MAX_NAME_LENGTH};
-use super::fat::ExfatChainPosition;
 use super::fat::FatChainFlags;
 use super::fs::ExfatFS;
 use super::inode::FatAttr;
