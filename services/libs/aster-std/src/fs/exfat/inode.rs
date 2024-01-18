@@ -1394,6 +1394,47 @@ impl Inode for ExfatInode {
             .0
             .write()
             .copy_metadata_from(new_inode);
+
+        // update its children's parent_hash for a directory
+        if old_inode
+            .0
+            .read()
+            .inode_impl
+            .0
+            .read()
+            .inode_type
+            .is_directory()
+        {
+            let new_parent_hash = old_inode.hash_index();
+            let sub_dir = old_inode.0.read().inode_impl.0.read().num_subdir;
+            let mut child_offsets: Vec<usize> = vec![];
+            impl DirentVisitor for Vec<usize> {
+                fn visit(
+                    &mut self,
+                    name: &str,
+                    ino: u64,
+                    type_: InodeType,
+                    offset: usize,
+                ) -> Result<()> {
+                    self.push(offset);
+                    Ok(())
+                }
+            }
+            old_inode
+                .0
+                .write()
+                .read_multiple_dirs(0, sub_dir as usize, &mut child_offsets)?;
+
+            let start_chain = old_inode.0.read().inode_impl.0.read().start_chain.clone();
+            for offset in child_offsets {
+                let child_dentry_pos = start_chain.walk_to_cluster_at_offset(offset)?;
+                let child_hash =
+                    make_hash_index(child_dentry_pos.0.cluster_id(), child_dentry_pos.1 as u32);
+                let child_inode = fs.find_opened_inode(child_hash).unwrap();
+                child_inode.0.write().inode_impl.0.write().parent_hash = new_parent_hash;
+            }
+        }
+
         // insert back
         let _ = fs.insert_inode(old_inode);
 
