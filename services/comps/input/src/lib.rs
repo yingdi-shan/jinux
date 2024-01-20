@@ -1,9 +1,14 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! The input devices of Asterinas.
 #![no_std]
 #![forbid(unsafe_code)]
 #![feature(fn_traits)]
 
 extern crate alloc;
+
+pub mod key;
+
 use core::any::Any;
 use core::fmt::Debug;
 
@@ -16,11 +21,18 @@ use component::ComponentInitError;
 
 use aster_frame::sync::SpinLock;
 use spin::Once;
-use virtio_input_decoder::DecodeType;
+
+use key::Key;
+use key::KeyStatus;
+
+#[derive(Debug, Clone, Copy)]
+pub enum InputEvent {
+    KeyBoard(Key, KeyStatus),
+}
 
 pub trait InputDevice: Send + Sync + Any + Debug {
     fn handle_irq(&self) -> Option<()>;
-    fn register_callbacks(&self, function: &'static (dyn Fn(DecodeType) + Send + Sync));
+    fn register_callbacks(&self, function: &'static (dyn Fn(InputEvent) + Send + Sync));
 }
 
 pub fn register_device(name: String, device: Arc<dyn InputDevice>) {
