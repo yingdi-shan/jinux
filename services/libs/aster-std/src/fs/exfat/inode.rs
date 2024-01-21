@@ -292,20 +292,20 @@ impl ExfatInodeInner {
             Some(self.inode_impl.0.read().size),
         )?;
 
-        let mut cont_unused = 0;
+        let mut count_unused = 0;
         let mut entry_id = 0;
 
         for dentry_result in dentry_iterator {
             let dentry = dentry_result?;
             match dentry {
                 ExfatDentry::UnUsed | ExfatDentry::Deleted(_) => {
-                    cont_unused += 1;
+                    count_unused += 1;
                 }
                 _ => {
-                    cont_unused = 0;
+                    count_unused = 0;
                 }
             }
-            if cont_unused >= num_dentries {
+            if count_unused >= num_dentries {
                 return Ok(entry_id - (num_dentries - 1));
             }
             entry_id += 1;
@@ -323,10 +323,15 @@ impl ExfatInodeInner {
             .write()
             .start_chain
             .extend_clusters(cluster_to_be_allocated as u32, sync)?;
-        self.inode_impl.0.write().size_allocated += cluster_size * cluster_to_be_allocated;
-        let size_allocated = self.inode_impl.0.read().size_allocated;
+        let old_size_allocated = self.inode_impl.0.write().size_allocated;
+        let size_allocated = old_size_allocated + cluster_size * cluster_to_be_allocated;
+        self.inode_impl.0.write().size_allocated = size_allocated;
         self.inode_impl.0.write().size = size_allocated;
-
+        self.page_cache.pages().resize(size_allocated)?;
+        let buf = vec![0; cluster_to_be_allocated * cluster_size];
+        self.page_cache
+            .pages()
+            .write_bytes(old_size_allocated, &buf)?;
         Ok(entry_id)
     }
 
@@ -341,28 +346,6 @@ impl ExfatInodeInner {
             return_errno!(Errno::ENAMETOOLONG)
         }
         let fs = self.fs();
-        // Allocate new cluster if no cluster is associated.
-        if !self
-            .inode_impl
-            .0
-            .write()
-            .start_chain
-            .is_current_cluster_valid()
-        {
-            let sync = self.inode_impl.0.read().is_sync();
-            self.inode_impl
-                .0
-                .write()
-                .start_chain
-                .extend_clusters(1, sync)?;
-            let cluster_size = fs.cluster_size();
-            let old_size_allocated = self.inode_impl.0.read().size_allocated;
-            self.inode_impl.0.write().size_allocated = old_size_allocated + cluster_size;
-            self.inode_impl.0.write().size = old_size_allocated + cluster_size;
-            self.page_cache
-                .pages()
-                .resize(old_size_allocated + cluster_size)?;
-        }
         // TODO: remove trailing periods of pathname.
         // Do not allow creation of files with names ending with period(s).
 
@@ -370,22 +353,22 @@ impl ExfatInodeInner {
         let num_dentries = name_dentries + 2; // FILE Entry + Stream Entry + Name Entry
         let entry = self.find_empty_dentry(num_dentries)? as u32;
         let dentry_set = ExfatDentrySet::from(fs.clone(), name, inode_type, mode)?;
+        let start_off = entry as usize * DENTRY_SIZE;
+        let end_off = (entry as usize + num_dentries) * DENTRY_SIZE;
+        self.page_cache
+            .pages()
+            .write_bytes(start_off, &dentry_set.to_le_bytes())?;
+        if self.inode_impl.0.read().is_sync() {
+            self.page_cache.pages().decommit(start_off..end_off)?;
+        }
+        self.inode_impl.0.write().num_subdir += 1;
+
         let pos = self
             .inode_impl
             .0
             .write()
             .start_chain
-            .walk_to_cluster_at_offset(entry as usize * DENTRY_SIZE)?;
-        if self.page_cache.pages().size() < (entry as usize + num_dentries) * DENTRY_SIZE {
-            self.page_cache
-                .pages()
-                .resize((entry as usize + num_dentries) as usize * DENTRY_SIZE)?;
-        }
-        self.page_cache
-            .pages()
-            .write_bytes(entry as usize * DENTRY_SIZE, &dentry_set.to_le_bytes())?;
-
-        self.inode_impl.0.write().num_subdir += 1;
+            .walk_to_cluster_at_offset(start_off)?;
         let new_inode = ExfatInode::build_inode_from_dentry_set(
             self.inode_impl.0.read().fs(),
             &dentry_set,
@@ -669,7 +652,7 @@ impl ExfatInodeInner {
             }
             _ => {}
         };
-        self.inode_impl.0.write().size_allocated = new_size;
+        self.inode_impl.0.write().size_allocated = new_num_clusters as usize * cluster_size;
         // Sync this inode if necessary.
         if sync {
             self.write_inode(true)?;
@@ -734,10 +717,14 @@ impl ExfatInodeInner {
             // Delete cluster chain if needed
             let dentry = ExfatDentry::try_from(&buf[buf_offset..buf_offset + DENTRY_SIZE])?;
             self.delete_associated_secondary_clusters(&dentry)?;
-            // Mark this dentry deleted
-            buf[buf_offset] &= 0x7F;
         }
+        buf.fill(0);
         self.page_cache.pages().write_bytes(offset, &mut buf)?;
+        if self.inode_impl.0.read().is_sync() {
+            self.page_cache
+                .pages()
+                .decommit(offset..offset + buf.len())?;
+        }
 
         self.inode_impl.0.write().num_subdir -= 1;
         // FIXME: We must make sure that there are no spare tailing clusters in a directory.
@@ -966,7 +953,10 @@ impl Inode for ExfatInode {
         //We must resize the inode before resizing the pagecache, to avoid the flush of extra dirty pages.
         inner.lock_and_resize(new_size)?;
 
-        inner.page_cache.pages().resize(new_size)
+        if new_size < inner.inode_impl.0.read().size {
+            inner.page_cache.pages().resize(new_size)?
+        }
+        Ok(())
     }
 
     fn metadata(&self) -> crate::fs::utils::Metadata {
@@ -1134,6 +1124,14 @@ impl Inode for ExfatInode {
 
         self.0.read().page_cache.pages().write_bytes(offset, buf)?;
 
+        if self.0.read().inode_impl.0.read().is_sync() {
+            self.0
+                .read()
+                .page_cache
+                .pages()
+                .decommit(offset..offset + buf.len())?;
+        }
+
         Ok(buf.len())
     }
 
@@ -1246,6 +1244,20 @@ impl Inode for ExfatInode {
         inode.0.write().page_cache.pages().resize(0)?;
 
         self.0.write().delete_dentry_set(offset, len)?;
+
+        let dentry_position = self
+            .0
+            .read()
+            .inode_impl
+            .0
+            .read()
+            .start_chain
+            .walk_to_cluster_at_offset(offset)?;
+
+        fs.remove_inode(make_hash_index(
+            dentry_position.0.cluster_id(),
+            dentry_position.1 as u32,
+        ));
         Ok(())
     }
 
@@ -1278,6 +1290,20 @@ impl Inode for ExfatInode {
         inode.0.write().page_cache.pages().resize(0)?;
 
         self.0.write().delete_dentry_set(offset, len)?;
+
+        let dentry_position = self
+            .0
+            .read()
+            .inode_impl
+            .0
+            .read()
+            .start_chain
+            .walk_to_cluster_at_offset(offset)?;
+
+        fs.remove_inode(make_hash_index(
+            dentry_position.0.cluster_id(),
+            dentry_position.1 as u32,
+        ));
         Ok(())
     }
 

@@ -401,6 +401,14 @@ mod test {
         let rmdir_empty_dir = root.rmdir(parent_name);
         assert!(rmdir_empty_dir.is_ok(), "Fail to remove an empty directory");
 
+        let parent_inode_again = create_folder(root.clone(), parent_name);
+        create_file(parent_inode.clone(), child_name);
+        let lookup_result = parent_inode.lookup(child_name);
+        assert!(
+            lookup_result.is_ok(),
+            "Fs deal with second create incorrectly, may need check pagecache"
+        );
+
         // test remove a long name directory
         let long_dir_name = "x".repeat(MAX_NAME_LENGTH);
         create_folder(root.clone(), &long_dir_name);
@@ -1033,8 +1041,12 @@ mod test {
         let root = fs.root_inode();
         let mut fs_in_mem = new_fs_in_memory(root);
 
-        let max_ops: u32 = 1000;
+        let max_ops: u32 = 3000;
+        let show_progress_per: u32 = 100;
         for idx in 0..max_ops {
+            if idx % show_progress_per == 0 {
+                error!("{:?}/{:?} done", idx, max_ops);
+            }
             let (file_or_dir, op) = generate_random_operation(&mut fs_in_mem, idx);
             file_or_dir.execute_and_test(op, false);
         }
